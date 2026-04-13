@@ -36,6 +36,14 @@ def _bidi_display(text: str) -> str:
         return text
 
 
+def _photo_status(record) -> str:
+    if getattr(record, "photo_artifact_id", None):
+        return "yes"
+    if getattr(record, "photo_url", None):
+        return "url"
+    return ""
+
+
 class OuHarvestTUI:
     """Lazy wrapper so importing this module without Textual still works."""
 
@@ -170,6 +178,7 @@ class OuHarvestTUI:
                             yield Button("Discover", id="run_discover")
                             yield Button("Crawl", id="run_crawl")
                             yield Button("Parse", id="run_parse")
+                            yield Button("Demographics", id="run_demographics")
                             yield Button("Enrich Ollama", id="run_enrich_ollama")
                             yield Button("Enrich OpenAI", id="run_enrich_openai")
                             yield Button("Review", id="run_review")
@@ -226,6 +235,18 @@ class OuHarvestTUI:
                                 yield Input(value=self.config.openai.api_key_env or "OPENAI_API_KEY", placeholder="OpenAI env var", id="openai_api_key_env")
                                 yield Label("API token (stored outside repo)", classes="field-label")
                                 yield Input(value="", placeholder="OpenAI token", password=True, id="openai_token")
+                            with Collapsible(title="Demographics", collapsed=True):
+                                yield Checkbox(
+                                    "Enable demographics",
+                                    value=self.config.demographics.enabled,
+                                    id="demographics_enabled",
+                                )
+                                yield Label("Detector backend", classes="field-label")
+                                yield Input(
+                                    value=self.config.demographics.detector_backend,
+                                    placeholder="Detector backend",
+                                    id="demographics_detector_backend",
+                                )
                             with Collapsible(title="Review", collapsed=True):
                                 yield Label("Confidence threshold", classes="field-label")
                                 yield Input(value=str(self.config.review.confidence_threshold), placeholder="Confidence threshold", id="confidence_threshold")
@@ -246,10 +267,11 @@ class OuHarvestTUI:
                 """Set tooltips on all buttons and config inputs."""
                 tips: dict[str, str] = {
                     # Run buttons
-                    "run_full": "Run all stages: discover, crawl, parse, enrich, review, export",
+                    "run_full": "Run all stages: discover, crawl, parse, demographics when enabled, enrich, review, export",
                     "run_discover": "Fetch the staff directory landing page and extract result links",
                     "run_crawl": "Follow result page links, fetch personal pages, CVs, and CRIS pages",
                     "run_parse": "Parse all downloaded HTML/PDF artifacts into PersonRecord JSON",
+                    "run_demographics": "Analyze downloaded profile photos with DeepFace when demographics is enabled",
                     "run_enrich_ollama": "Enrich records using local Ollama LLM (education, appointments, etc.)",
                     "run_enrich_openai": "Enrich records using OpenAI API (education, appointments, etc.)",
                     "run_review": "Build the review queue from low-confidence records",
@@ -277,6 +299,8 @@ class OuHarvestTUI:
                     "openai_model": "OpenAI model name for enrichment extraction",
                     "openai_api_key_env": "Environment variable name that holds the OpenAI API key",
                     "openai_token": "Paste an OpenAI API key here, then click Save Token to store it locally",
+                    "demographics_enabled": "Enable demographics and include the demographics stage in Full Run",
+                    "demographics_detector_backend": "DeepFace detector backend used during photo analysis",
                     "confidence_threshold": "Records with confidence below this are flagged for review (default: 0.78)",
                     "university": "Select which university to scrape (openu, bgu, technion_med)",
                 }
@@ -303,6 +327,7 @@ class OuHarvestTUI:
                     "run_discover": lambda: self._start_background("discover"),
                     "run_crawl": lambda: self._start_background("crawl"),
                     "run_parse": lambda: self._start_background("parse"),
+                    "run_demographics": lambda: self._start_background("demographics"),
                     "run_enrich_ollama": lambda: self._start_background("enrich", provider="ollama"),
                     "run_enrich_openai": lambda: self._start_background("enrich", provider="openai"),
                     "run_review": lambda: self._start_background("review"),
@@ -481,6 +506,8 @@ class OuHarvestTUI:
                         self.active_runner.crawl()
                     elif command == "parse":
                         self.active_runner.parse()
+                    elif command == "demographics":
+                        self.active_runner.analyze_demographics()
                     elif command == "enrich":
                         self.active_runner.enrich(kwargs["provider"])
                     elif command == "review":
@@ -543,6 +570,7 @@ class OuHarvestTUI:
                     "run_discover",
                     "run_crawl",
                     "run_parse",
+                    "run_demographics",
                     "run_enrich_ollama",
                     "run_enrich_openai",
                     "run_review",
@@ -627,6 +655,9 @@ class OuHarvestTUI:
                 self.config.openai.base_url = self.query_one("#openai_base_url", Input).value.strip()
                 self.config.openai.model = self.query_one("#openai_model", Input).value.strip()
                 self.config.openai.api_key_env = self.query_one("#openai_api_key_env", Input).value.strip() or None
+                self.config.demographics.enabled = self.query_one("#demographics_enabled", Checkbox).value
+                detector_backend = self.query_one("#demographics_detector_backend", Input).value.strip()
+                self.config.demographics.detector_backend = detector_backend or "retinaface"
                 discovery = self._active_discovery_state()
                 if discovery.get("available_filters"):
                     connector_filters: dict[str, list[str]] = {}
@@ -681,9 +712,10 @@ class OuHarvestTUI:
                     f"Status: {'RUNNING' if running else 'idle'}  |  Stage: {stage}{progress_str}  |  {_bidi_display(message)}",
                     f"Current: {person}  |  URL: {current_url}",
                     "",
-                    f"Records: {snapshot['records_count']}  |  Review: {snapshot['review_queue_count']}  |  HTML: {snapshot['raw_html_count']}  |  PDF: {snapshot['raw_pdf_count']}",
+                    f"Records: {snapshot['records_count']}  |  Review: {snapshot['review_queue_count']}  |  HTML: {snapshot['raw_html_count']}  |  PDF: {snapshot['raw_pdf_count']}  |  Images: {snapshot['raw_image_count']}",
                     f"Crawl Manifest: {snapshot['crawl_manifest_count']}  |  Discovered: {snapshot['discovered_result_links']}",
                     "",
+                    f"Demographics: {'ON' if self.config.demographics.enabled else 'off'} ({self.config.demographics.detector_backend})",
                     f"Ollama: {'ON' if self.config.ollama.enabled else 'off'} ({self.config.ollama.model})  |  OpenAI: {'ON' if self.config.openai.enabled else 'off'} ({self.config.openai.model})",
                     f"OpenAI Token: {'available' if token else 'missing'} ({token_source or 'none'})",
                 ]
@@ -692,7 +724,7 @@ class OuHarvestTUI:
             def _configure_tables(self) -> None:
                 records = self.query_one("#records", DataTable)
                 records.cursor_type = "row"
-                records.add_columns("Name", "Rank", "Role", "Email", "Department", "Links")
+                records.add_columns("Name", "Gender", "Race", "Age", "Photo", "Rank", "Role", "Email", "Department", "Links")
 
                 reviews = self.query_one("#reviews", DataTable)
                 reviews.cursor_type = "row"
@@ -708,8 +740,13 @@ class OuHarvestTUI:
                     dept = ""
                     if record.org_affiliations:
                         dept = record.org_affiliations[0].department or ""
+                    demographics = record.demographics
                     table.add_row(
                         _bidi_display(record.full_name),
+                        demographics.dominant_gender if demographics and demographics.dominant_gender else "",
+                        demographics.dominant_race if demographics and demographics.dominant_race else "",
+                        str(demographics.estimated_age) if demographics and demographics.estimated_age is not None else "",
+                        _photo_status(record),
                         _bidi_display(record.current_rank or ""),
                         _bidi_display(record.current_role or ""),
                         record.primary_email or "",

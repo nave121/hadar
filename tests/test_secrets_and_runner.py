@@ -204,3 +204,14 @@ def test_runner_doctor_reports_secret_source(tmp_path: Path):
 
     assert report["providers"]["openai"]["api_key_available"] is True
     assert report["providers"]["openai"]["api_key_source"] == f"secret:{store.path}"
+
+
+def test_runner_snapshot_reports_raw_image_count(tmp_path: Path):
+    config = AppConfig(output_root=str(tmp_path))
+    runner = PipelineRunner(config)
+    runner.storage.raw_image.mkdir(parents=True, exist_ok=True)
+    (runner.storage.raw_image / "abc123.jpg").write_bytes(b"img")
+
+    snapshot = runner.snapshot()
+
+    assert snapshot["raw_image_count"] == 1

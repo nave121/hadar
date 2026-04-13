@@ -138,6 +138,7 @@ class PipelineRunner:
             "records_count": len(self.storage.all_records()),
             "raw_html_count": len(list(self.storage.raw_html.glob("*.html"))),
             "raw_pdf_count": len(list(self.storage.raw_pdf.glob("*.pdf"))),
+            "raw_image_count": len(list(self.storage.raw_image.glob("*.*"))),
             "review_queue_count": len(review_queue),
             "crawl_manifest_count": len(crawl_manifest.get("urls", [])),
             "discovered_result_links": len(discovery.get("result_links", [])),
