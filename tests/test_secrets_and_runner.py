@@ -170,13 +170,29 @@ def test_runner_emits_demographics_stage_lifecycle_events():
                 )
             return [1, 2]
 
-    runner = PipelineRunner(AppConfig(), pipeline_factory=FakePipeline, event_sink=events.append)
+    config = AppConfig()
+    config.demographics.enabled = True
+    runner = PipelineRunner(config, pipeline_factory=FakePipeline, event_sink=events.append)
     runner.analyze_demographics()
 
     kinds = [event.kind for event in events]
     assert kinds[0] == "stage_started"
     assert "progress" in kinds
     assert kinds[-1] == "stage_completed"
+
+
+def test_runner_demographics_skips_when_disabled():
+    events: list[RunEvent] = []
+    config = AppConfig()
+    assert config.demographics.enabled is False
+
+    runner = PipelineRunner(config, event_sink=events.append)
+    result = runner.analyze_demographics()
+
+    assert result == []
+    kinds = [event.kind for event in events]
+    assert "log" in kinds
+    assert any("disabled" in (e.message or "") for e in events)
 
 
 def test_runner_doctor_reports_secret_source(tmp_path: Path):

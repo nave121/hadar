@@ -124,6 +124,139 @@ def test_pipeline_photo_artifact_linkage(tmp_path: Path):
     assert any(artifact.kind == "image" and artifact.artifact_id == photo_artifact.artifact_id for artifact in record.artifacts)
 
 
+def test_pipeline_crawl_downloads_photos_when_demographics_enabled(tmp_path: Path, monkeypatch):
+    """Crawl stage downloads photo URLs from result-page cards when demographics is enabled."""
+    from unittest.mock import MagicMock
+    from ou_harvest.http import FetchResult
+    from ou_harvest.models import DiscoveryLink, DiscoverySnapshot
+
+    photo_url = "https://apps4cloud.bgu.ac.il/media/photos/test.jpg"
+    listing_url = "https://www.bgu.ac.il/people/"
+    listing_html = f"""
+    <html><body>
+    <a class="staff-member-item" href="/people/test/">
+      <div class="member-image"><img src="{photo_url}" /></div>
+      <div class="member-content">
+        <div class="top-section"><h2 class="member-name">ד"ר טסט</h2></div>
+        <div class="department">
+          <span>מרצה בכיר</span><div class="department-separator"></div>
+          <span>חבר/ת סגל אקדמי בכיר</span><div class="department-separator"></div>
+          <span>מדעים</span>
+        </div>
+        <div class="bottom-section"><a href="mailto:t@bgu.ac.il">t@bgu.ac.il</a></div>
+      </div>
+    </a>
+    </body></html>
+    """
+    config = AppConfig(
+        university="bgu",
+        output_root=str(tmp_path),
+        allowed_domains=["bgu.ac.il", "apps4cloud.bgu.ac.il"],
+        personal_page_limit=0,
+    )
+    config.demographics.enabled = True
+
+    pipeline = OuHarvestPipeline(config)
+    storage = pipeline.storage
+
+    # Seed discovery state so crawl skips discover()
+    snapshot = DiscoverySnapshot(
+        start_url=listing_url,
+        connector_name="bgu",
+        result_links=[DiscoveryLink(url=listing_url)],
+    )
+    storage.save_json("state/discovery.json", snapshot.model_dump(mode="json"))
+
+    # Mock the fetchers so nothing hits the network
+    listing_result = FetchResult(
+        url=listing_url, status_code=200,
+        content=listing_html.encode(), content_type="text/html",
+    )
+    photo_result = FetchResult(
+        url=photo_url, status_code=200,
+        content=b"\xff\xd8\xff\xe0fake-jpeg", content_type="image/jpeg",
+    )
+    personal_url = "https://www.bgu.ac.il/people/test/"
+    personal_result = FetchResult(
+        url=personal_url, status_code=200,
+        content=b"<html><body>empty profile</body></html>", content_type="text/html",
+    )
+
+    def fake_fetch(url):
+        if url == listing_url:
+            return listing_result
+        if url == photo_url:
+            return photo_result
+        if url == personal_url:
+            return personal_result
+        raise ValueError(f"Unexpected fetch: {url}")
+
+    pipeline.fetcher = MagicMock()
+    pipeline.fetcher.fetch = MagicMock(side_effect=fake_fetch)
+    pipeline.binary_fetcher = MagicMock()
+    pipeline.binary_fetcher.fetch = MagicMock(side_effect=fake_fetch)
+
+    crawled = pipeline.crawl()
+
+    assert photo_url in crawled
+    # Verify image artifact was stored
+    image_files = list(storage.raw_image.glob("*.jpg"))
+    assert len(image_files) == 1
+
+
+def test_pipeline_crawl_skips_photos_when_demographics_disabled(tmp_path: Path, monkeypatch):
+    """Crawl stage does NOT download photos when demographics.enabled is False."""
+    from unittest.mock import MagicMock
+    from ou_harvest.http import FetchResult
+    from ou_harvest.models import DiscoveryLink, DiscoverySnapshot
+
+    photo_url = "https://apps4cloud.bgu.ac.il/media/photos/test.jpg"
+    listing_url = "https://www.bgu.ac.il/people/"
+    listing_html = f"""
+    <html><body>
+    <a class="staff-member-item" href="/people/test/">
+      <div class="member-image"><img src="{photo_url}" /></div>
+      <div class="member-content">
+        <div class="top-section"><h2 class="member-name">ד"ר טסט</h2></div>
+        <div class="department"><span>מרצה בכיר</span></div>
+        <div class="bottom-section"><a href="mailto:t@bgu.ac.il">t@bgu.ac.il</a></div>
+      </div>
+    </a>
+    </body></html>
+    """
+    config = AppConfig(
+        university="bgu",
+        output_root=str(tmp_path),
+        allowed_domains=["bgu.ac.il", "apps4cloud.bgu.ac.il"],
+        personal_page_limit=0,
+    )
+    assert config.demographics.enabled is False
+
+    pipeline = OuHarvestPipeline(config)
+    storage = pipeline.storage
+
+    snapshot = DiscoverySnapshot(
+        start_url=listing_url,
+        connector_name="bgu",
+        result_links=[DiscoveryLink(url=listing_url)],
+    )
+    storage.save_json("state/discovery.json", snapshot.model_dump(mode="json"))
+
+    listing_result = FetchResult(
+        url=listing_url, status_code=200,
+        content=listing_html.encode(), content_type="text/html",
+    )
+    pipeline.fetcher = MagicMock()
+    pipeline.fetcher.fetch = MagicMock(return_value=listing_result)
+    pipeline.binary_fetcher = MagicMock()
+
+    crawled = pipeline.crawl()
+
+    assert photo_url not in crawled
+    pipeline.binary_fetcher.fetch.assert_not_called()
+    assert list(storage.raw_image.glob("*.jpg")) == []
+
+
 def test_pipeline_parse_resolves_bgu_cris_page_after_profile_adds_matching_link(tmp_path: Path):
     config = AppConfig(university="bgu", output_root=str(tmp_path))
     storage = Storage(tmp_path)

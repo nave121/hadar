@@ -41,11 +41,14 @@ class OuHarvestPipeline:
         should_cancel: Callable[[], bool] | None = None,
         secret_store: SecretStore | None = None,
     ):
-        self.config = config
         self.adapter = get_adapter(config.university)
-        self.storage = Storage(config.output_path)
-        self.fetcher = guess_fetcher(config, force_playwright=self.adapter.requires_playwright())
-        self.binary_fetcher = RequestsFetcher(config)
+        # Merge adapter's known domains into config so fetchers can reach
+        # photo CDNs and other connector-specific hosts automatically.
+        merged_domains = sorted(set(config.allowed_domains) | set(self.adapter.default_allowed_domains))
+        self.config = config.model_copy(update={"allowed_domains": merged_domains})
+        self.storage = Storage(self.config.output_path)
+        self.fetcher = guess_fetcher(self.config, force_playwright=self.adapter.requires_playwright())
+        self.binary_fetcher = RequestsFetcher(self.config)
         self.event_sink = event_sink
         self.should_cancel = should_cancel or (lambda: False)
         self.secret_store = secret_store or SecretStore()
@@ -144,11 +147,12 @@ class OuHarvestPipeline:
                 crawled_count=len(crawled_urls),
             )
             result_page = self.adapter.parse_results_page(fetched.text, fetched.url)
-            for person in result_page.people:
-                if person.photo_url:
-                    photo_artifact = self._download_photo(person.photo_url, seen)
-                    if photo_artifact is not None:
-                        crawled_urls.append(photo_artifact.source_url)
+            if self.config.demographics.enabled:
+                for person in result_page.people:
+                    if person.photo_url:
+                        photo_artifact = self._download_photo(person.photo_url, seen)
+                        if photo_artifact is not None:
+                            crawled_urls.append(photo_artifact.source_url)
             for next_url in result_page.pagination_urls:
                 if next_url not in seen:
                     queue.append(next_url)
@@ -197,11 +201,12 @@ class OuHarvestPipeline:
                 # Follow CV/PDF links found on personal pages
                 if kind == "html":
                     page_data = self.adapter.parse_personal_page(personal_fetch.text, personal_fetch.url)
-                    photo_url = page_data.photo_url or self.adapter.extract_photo_url(personal_fetch.text, personal_fetch.url)
-                    if photo_url:
-                        photo_artifact = self._download_photo(photo_url, seen)
-                        if photo_artifact is not None:
-                            crawled_urls.append(photo_artifact.source_url)
+                    if self.config.demographics.enabled:
+                        photo_url = page_data.photo_url or self.adapter.extract_photo_url(personal_fetch.text, personal_fetch.url)
+                        if photo_url:
+                            photo_artifact = self._download_photo(photo_url, seen)
+                            if photo_artifact is not None:
+                                crawled_urls.append(photo_artifact.source_url)
                     cv_links = [link.url for link in page_data.links if link.kind == "cv"]
                     for cv_url in cv_links:
                         self._check_cancel("crawl")
@@ -626,8 +631,7 @@ class OuHarvestPipeline:
         return artifact
 
     def _artifact_for_url(self, source_url: str, *, kind: str) -> Artifact | None:
-        fingerprints = self.storage.load_json("state/fingerprints.json", default={})
-        checksum = fingerprints.get(source_url)
+        checksum = self.storage._load_fingerprints().get(source_url)
         if not checksum:
             return None
 

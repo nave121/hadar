@@ -52,6 +52,9 @@ class PipelineRunner:
 
     def analyze_demographics(self):
         self.clear_cancel()
+        if not self.config.demographics.enabled:
+            self._emit("log", stage="demographics", message="Demographics stage is disabled in config; skipping")
+            return []
         return self._run_stage("demographics", lambda pipeline: pipeline.analyze_demographics())
 
     def enrich(self, provider_name: str):
