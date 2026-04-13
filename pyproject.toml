@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ou-harvest"
+version = "0.1.0"
+description = "Incremental public OU staff harvester with deterministic parsing and optional LLM enrichment."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "beautifulsoup4>=4.12",
+  "pydantic>=2.7",
+  "requests>=2.31",
+]
+
+[project.optional-dependencies]
+playwright = ["playwright>=1.44"]
+pdf = ["pdfplumber>=0.11", "pypdf>=4.2"]
+tui = ["textual>=0.52", "python-bidi>=0.6"]
+
+[project.scripts]
+ou_harvest = "ou_harvest.cli:main"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

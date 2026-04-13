@@ -1,0 +1,27 @@
+university = "openu"
+start_url = "https://www.openu.ac.il/staff/pages/default.aspx"
+seed_result_urls = [
+  "https://www.openu.ac.il/staff/pages/results.aspx?unit=307&staff=10",
+]
+allowed_domains = ["openu.ac.il", "academic.openu.ac.il"]
+request_timeout_seconds = 30
+throttle_seconds = 0.5
+user_agent = "ou-harvest/0.1 (+public academic directory crawler)"
+output_root = "data"
+personal_page_limit = 0
+selected_units = []
+selected_staff_types = []
+
+[ollama]
+enabled = true
+base_url = "http://localhost:11434"
+model = "qwen3.5:397b-cloud"
+
+[openai]
+enabled = false
+base_url = "https://api.openai.com/v1"
+model = "gpt-4.1-mini"
+api_key_env = "OPENAI_API_KEY"
+
+[review]
+confidence_threshold = 0.78
