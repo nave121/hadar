@@ -39,6 +39,36 @@ def test_storage_artifact_fingerprint_and_review_queue(tmp_path: Path):
     assert review_path.exists()
 
 
+def test_storage_writes_image_artifact(tmp_path: Path):
+    storage = Storage(tmp_path)
+    artifact = storage.write_artifact(
+        kind="image",
+        source_url="https://example.com/photo.jpg",
+        content=b"jpeg-bytes",
+        content_type="image/jpeg",
+    )
+
+    assert artifact.kind == "image"
+    assert Path(artifact.path).parent == tmp_path / "raw" / "image"
+    assert Path(artifact.path).suffix == ".jpg"
+    assert Path(artifact.path).read_bytes() == b"jpeg-bytes"
+
+
+def test_storage_image_png_extension(tmp_path: Path):
+    storage = Storage(tmp_path)
+    artifact = storage.write_artifact(
+        kind="image",
+        source_url="https://example.com/photo.png",
+        content=b"png-bytes",
+        content_type="image/png",
+    )
+
+    assert artifact.kind == "image"
+    assert Path(artifact.path).parent == tmp_path / "raw" / "image"
+    assert Path(artifact.path).suffix == ".png"
+    assert Path(artifact.path).read_bytes() == b"png-bytes"
+
+
 def test_fingerprint_cache_defers_writes(tmp_path: Path):
     storage = Storage(tmp_path)
     fp_path = tmp_path / "state" / "fingerprints.json"

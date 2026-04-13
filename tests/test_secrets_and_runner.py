@@ -44,6 +44,8 @@ def test_config_save_round_trip(tmp_path: Path):
     )
     config.ollama.enabled = True
     config.openai.api_key_env = "MY_OPENAI_KEY"
+    config.demographics.enabled = True
+    config.demographics.detector_backend = "mtcnn"
     path = tmp_path / "ou_harvest.toml"
 
     config.save(path)
@@ -57,6 +59,8 @@ def test_config_save_round_trip(tmp_path: Path):
     }
     assert loaded.ollama.enabled is True
     assert loaded.openai.api_key_env == "MY_OPENAI_KEY"
+    assert loaded.demographics.enabled is True
+    assert loaded.demographics.detector_backend == "mtcnn"
     assert loaded.source_path == path
 
 
@@ -140,6 +144,34 @@ def test_runner_emits_stage_lifecycle_events():
 
     runner = PipelineRunner(AppConfig(), pipeline_factory=FakePipeline, event_sink=events.append)
     runner.discover()
+
+    kinds = [event.kind for event in events]
+    assert kinds[0] == "stage_started"
+    assert "progress" in kinds
+    assert kinds[-1] == "stage_completed"
+
+
+def test_runner_emits_demographics_stage_lifecycle_events():
+    events: list[RunEvent] = []
+
+    class FakePipeline:
+        def __init__(self, config, *, event_sink=None, should_cancel=None, secret_store=None):
+            self.event_sink = event_sink
+
+        def analyze_demographics(self):
+            if self.event_sink is not None:
+                self.event_sink(
+                    RunEvent(
+                        kind="progress",
+                        stage="demographics",
+                        message="fake progress",
+                        data={"person_id": "abc123"},
+                    )
+                )
+            return [1, 2]
+
+    runner = PipelineRunner(AppConfig(), pipeline_factory=FakePipeline, event_sink=events.append)
+    runner.analyze_demographics()
 
     kinds = [event.kind for event in events]
     assert kinds[0] == "stage_started"

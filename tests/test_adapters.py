@@ -88,6 +88,52 @@ def test_bgu_parse_live_results_page_keeps_orcid_links_from_listing_cards():
     )
 
 
+def test_bgu_listing_extracts_photo_url_for_staff_with_real_photo():
+    adapter = get_adapter("bgu")
+    html = """
+    <html>
+      <body>
+        <a class="staff-member-item" href="/people/test-person/">
+          <div class="member-image">
+            <img src="https://apps4cloud.bgu.ac.il/media/photos/test-person.jpg?width=300&format=webp" />
+          </div>
+          <div class="member-content">
+            <div class="top-section">
+              <h2 class="member-name">ד"ר טסט</h2>
+            </div>
+            <div class="department">
+              <span>מרצה בכיר</span>
+              <div class="department-separator"></div>
+              <span>חבר/ת סגל אקדמי בכיר</span>
+              <div class="department-separator"></div>
+              <span>הפקולטה למדעי הרוח והחברה, כלכלה</span>
+            </div>
+            <div class="bottom-section">
+              <a href="mailto:test@bgu.ac.il">test@bgu.ac.il</a>
+            </div>
+          </div>
+        </a>
+      </body>
+    </html>
+    """
+
+    result = adapter.parse_results_page(html, "https://www.bgu.ac.il/people/")
+
+    assert result.people[0].photo_url == (
+        "https://apps4cloud.bgu.ac.il/media/photos/test-person.jpg?width=300&format=webp"
+    )
+
+
+def test_bgu_listing_filters_placeholder_photo():
+    fixture = FIXTURES / "bgu_listing_live.html"
+    adapter = get_adapter("bgu")
+    html = fixture.read_text(encoding="utf-8")
+    result = adapter.parse_results_page(html, "https://www.bgu.ac.il/people/")
+
+    person = next(record for record in result.people if record.full_name == "חליל אבו יונס")
+    assert person.photo_url is None
+
+
 def test_bgu_parse_live_results_page_preserves_rank_staff_type_and_department():
     fixture = FIXTURES / "bgu_listing_live.html"
     adapter = get_adapter("bgu")
@@ -181,6 +227,16 @@ def test_technion_parse_profile_page():
     assert "Aaron" in person.full_name or "Ciechanover" in person.full_name
     assert person.person_id
     assert any(c.kind == "email" for c in person.contacts)
+    assert person.photo_url == "https://md.technion.ac.il/wp-content/uploads/2020/08/ciehanover-250x375.jpg"
+
+
+def test_openu_extract_photo_url_returns_none():
+    adapter = get_adapter("openu")
+
+    assert adapter.extract_photo_url(
+        "<html><body><img src=\"/media/photo.jpg\"></body></html>",
+        "https://www.openu.ac.il/staff/pages/results.aspx?unit=311",
+    ) is None
 
 
 @pytest.mark.parametrize(
@@ -220,6 +276,7 @@ def test_bgu_parse_profile_page_scopes_contacts_and_filters_site_chrome(
     assert result.name == expected_name
     assert [(contact.kind, contact.value) for contact in result.contacts] == [("email", expected_email)]
     assert not any("apps4cloud" in link.url for link in result.links)
+    assert result.photo_url is None
 
 
 def test_bgu_parse_profile_page_keeps_orcid_without_turning_it_into_phone():

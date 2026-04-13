@@ -38,6 +38,92 @@ def test_pipeline_parse_recognizes_bgu_listing_pages_without_results_aspx(tmp_pa
     )
 
 
+def _seed_bgu_listing_with_photo(
+    tmp_path: Path,
+    *,
+    include_photo_artifact: bool,
+) -> tuple[AppConfig, str, str, object | None]:
+    config = AppConfig(university="bgu", output_root=str(tmp_path))
+    storage = Storage(tmp_path)
+    listing_url = "https://www.bgu.ac.il/people/"
+    photo_url = "https://apps4cloud.bgu.ac.il/media/photos/test-person.jpg?width=300&format=webp"
+    listing_html = f"""
+    <html>
+      <body>
+        <a class="staff-member-item" href="/people/test-person/">
+          <div class="member-image">
+            <img src="{photo_url}" />
+          </div>
+          <div class="member-content">
+            <div class="top-section">
+              <h2 class="member-name">ד"ר טסט</h2>
+            </div>
+            <div class="department">
+              <span>מרצה בכיר</span>
+              <div class="department-separator"></div>
+              <span>חבר/ת סגל אקדמי בכיר</span>
+              <div class="department-separator"></div>
+              <span>הפקולטה למדעי הרוח והחברה, כלכלה</span>
+            </div>
+            <div class="bottom-section">
+              <a href="mailto:test@bgu.ac.il">test@bgu.ac.il</a>
+            </div>
+          </div>
+        </a>
+      </body>
+    </html>
+    """
+
+    listing_artifact = storage.write_artifact(
+        kind="html",
+        source_url=listing_url,
+        content=listing_html.encode("utf-8"),
+        content_type="text/html",
+    )
+    storage.update_fingerprint(listing_url, listing_artifact.checksum)
+
+    photo_artifact = None
+    if include_photo_artifact:
+        photo_artifact = storage.write_artifact(
+            kind="image",
+            source_url=photo_url,
+            content=b"photo-bytes",
+            content_type="image/jpeg",
+        )
+        storage.update_fingerprint(photo_url, photo_artifact.checksum)
+
+    storage.flush_fingerprints()
+    storage.save_json("state/crawl_manifest.json", {"urls": [listing_url]})
+    return config, photo_url, listing_url, photo_artifact
+
+
+def test_pipeline_parse_preserves_photo_url_from_bgu_listing(tmp_path: Path):
+    config, photo_url, _, _ = _seed_bgu_listing_with_photo(tmp_path, include_photo_artifact=False)
+
+    records = OuHarvestPipeline(config).parse()
+
+    assert len(records) == 1
+    record = records[0]
+    assert record.photo_url == photo_url
+    assert record.photo_artifact_id is None
+
+
+def test_pipeline_photo_artifact_linkage(tmp_path: Path):
+    config, photo_url, _, photo_artifact = _seed_bgu_listing_with_photo(
+        tmp_path,
+        include_photo_artifact=True,
+    )
+
+    records = OuHarvestPipeline(config).parse()
+
+    assert len(records) == 1
+    record = records[0]
+    assert record.photo_url == photo_url
+    assert photo_artifact is not None
+    assert record.photo_artifact_id == photo_artifact.artifact_id
+    assert any(artifact.kind == "image" and artifact.artifact_id == photo_artifact.artifact_id for artifact in record.artifacts)
+
+
 def test_pipeline_parse_resolves_bgu_cris_page_after_profile_adds_matching_link(tmp_path: Path):
     config = AppConfig(university="bgu", output_root=str(tmp_path))
     storage = Storage(tmp_path)
