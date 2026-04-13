@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-ou-harvest is a stage-based pipeline for harvesting public academic staff profiles from the Open University of Israel directory. It scrapes, parses, and optionally enriches records with LLM extraction (Ollama or OpenAI). It has both a CLI and a Textual-based TUI. Python 3.11+, Pydantic v2, BeautifulSoup4.
+ou-harvest is a stage-based pipeline for harvesting public academic staff profiles from multiple Israeli university directories. It currently supports three connectors: Open University of Israel, Ben-Gurion University, and Technion Faculty of Medicine. The pipeline scrapes, parses, and optionally enriches records with LLM extraction (Ollama or OpenAI). It has both a CLI and a Textual-based TUI. Python 3.11+, Pydantic v2, BeautifulSoup4.
 
 ## Commands
 
@@ -41,7 +41,8 @@ The pipeline runs six ordered stages: **discover -> crawl -> parse -> enrich -> 
 - **pipeline.py** (`OuHarvestPipeline`) — Core pipeline implementing all six stages. Scraping, parsing, enrichment, and export logic lives here. Caches a reverse checksum map for artifact-to-URL lookups during parse.
 - **runner.py** (`PipelineRunner`) — Wraps the pipeline with event emission, cancellation support (via `threading.Event`), and stage orchestration. Used by both CLI and TUI. `storage` is a `cached_property`.
 - **models.py** — Pydantic v2 models. `PersonRecord` is the central data type with `merge()` for combining records from multiple sources and `create_id()` for deterministic ID generation (SHA1 of email or name). `dedupe_models()` and `_dedupe_as_dicts()` handle list-field deduplication.
-- **parsers.py** — BeautifulSoup HTML parsers for three page types: discovery page, results page (two layouts: table rows via `tr.zebra-generic` and container-based), and personal pages. Handles Hebrew text, RTL content, and OU-specific HTML patterns.
+- **parsers.py** — Legacy Open University BeautifulSoup parsers for discovery pages, results pages (two layouts: table rows via `tr.zebra-generic` and container-based), and personal pages. Handles Hebrew text, RTL content, and OU-specific HTML patterns.
+- **adapters/** — Multi-connector adapter layer. `base.py` defines the `UniversityAdapter` abstract base class plus shared adapter contract. `openu.py` wraps the legacy parser-based Open University implementation. `bgu.py` implements the Ben-Gurion University connector, including generated listing URLs and profile parsing. `technion_med.py` implements the Technion Faculty of Medicine connector using sitemap discovery and per-profile parsing.
 - **storage.py** (`Storage`) — Content-addressed artifact storage and record persistence. Artifacts named by SHA256 prefix. Fingerprints are cached in memory and flushed to disk via `flush_fingerprints()`.
 - **llm.py** — LLM extraction via `OllamaExtractor` or `OpenAIExtractor`. Both use the same JSON schema (`EXTRACTION_SCHEMA`) and prompt structure. Returns `{}` on malformed JSON responses instead of crashing.
 - **config.py** (`AppConfig`) — TOML-based config with Pydantic validation. `ProviderConfig` has a `field_validator` that coerces empty strings to `None` for `api_key_env`.
@@ -53,12 +54,18 @@ The pipeline runs six ordered stages: **discover -> crawl -> parse -> enrich -> 
 
 ### Data flow
 
-1. **discover** — Fetches the staff directory landing page, extracts result page links and department links, merges with `seed_result_urls` from config.
-2. **crawl** — Follows result page links (with pagination), fetches linked personal pages, CVs, and CRIS pages. All content stored as content-addressed artifacts in `data/raw/`. `personal_page_limit` is enforced globally across the entire crawl. Fingerprints are flushed to disk at stage end.
+1. **discover** — Runs connector-specific discovery. OpenU parses its landing page, BGU loads connector metadata and generates listing URLs, and Technion Med reads its sitemap to discover profile URLs. Discovery merges generated links with `seed_result_urls` from config.
+2. **crawl** — Follows result page links (with pagination where applicable), fetches linked personal pages, CVs, and CRIS pages. All content stored as content-addressed artifacts in `data/raw/`. `personal_page_limit` is enforced globally across the entire crawl. Fingerprints are flushed to disk at stage end.
 3. **parse** — Reads stored HTML artifacts, routes through the appropriate parser (results vs personal page), merges records by `person_id`. PDF CVs are text-extracted via `text_extract.extract_pdf_text()` and attached as artifacts. Uses a cached reverse checksum map for artifact-to-URL lookups.
 4. **enrich** — Sends profile text and CV text (chunked at ~10k chars) to an LLM extractor. Results merged into records with per-field confidence scores. Low-confidence extractions get `ReviewFlag`s.
 5. **review** — Collects records below the confidence threshold into a review queue.
 6. **export** — Writes `data/exports/people.json` or `people.jsonl`.
+
+### Connector notes
+
+- **OpenU** — Uses the legacy parser flow in `parsers.py` and does not require Playwright.
+- **BGU** — Uses the `bgu` adapter and requires Playwright because the directory is a rendered SPA.
+- **Technion Med** — Uses the `technion_med` adapter, discovers profiles from `page-sitemap.xml`, and also requires Playwright for robust profile rendering.
 
 ### Record identity and merging
 
@@ -72,7 +79,7 @@ The pipeline runs six ordered stages: **discover -> crawl -> parse -> enrich -> 
 
 Tests use HTML fixtures in `tests/fixtures/` captured from real OU page structures. The `pythonpath` is configured to `src` in `pyproject.toml`. Tests use pytest with `tmp_path`, `monkeypatch`, and `unittest.mock` for stubbing HTTP and pipeline factories.
 
-Test files: `test_parsers.py`, `test_storage.py`, `test_secrets_and_runner.py`, `test_cv_enrichment.py`, `test_http.py`, `test_llm.py`.
+Test files: `test_parsers.py`, `test_adapters.py`, `test_pipeline.py`, `test_storage.py`, `test_secrets_and_runner.py`, `test_cv_enrichment.py`, `test_http.py`, `test_llm.py`.
 
 ## Config
 
