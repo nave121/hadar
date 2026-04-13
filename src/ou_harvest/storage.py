@@ -14,6 +14,7 @@ class Storage:
         self.raw_html = root / "raw" / "html"
         self.raw_pdf = root / "raw" / "pdf"
         self.raw_text = root / "raw" / "text"
+        self.raw_image = root / "raw" / "image"
         self.records = root / "records"
         self.review = root / "review"
         self.exports = root / "exports"
@@ -22,6 +23,7 @@ class Storage:
             self.raw_html,
             self.raw_pdf,
             self.raw_text,
+            self.raw_image,
             self.records,
             self.review,
             self.exports,
@@ -34,12 +36,24 @@ class Storage:
         self, *, kind: str, source_url: str, content: bytes, content_type: str | None = None
     ) -> Artifact:
         checksum = sha256(content).hexdigest()
-        extension = {"html": ".html", "pdf": ".pdf", "text": ".txt", "json": ".json"}.get(kind, ".bin")
+        normalized_content_type = (content_type or "").split(";", 1)[0].strip().lower()
+        extension = {
+            "html": ".html",
+            "pdf": ".pdf",
+            "text": ".txt",
+            "json": ".json",
+            "image": {
+                "image/jpeg": ".jpg",
+                "image/png": ".png",
+                "image/webp": ".webp",
+            }.get(normalized_content_type, ".bin"),
+        }.get(kind, ".bin")
         artifact_id = checksum[:16]
         target_dir = {
             "html": self.raw_html,
             "pdf": self.raw_pdf,
             "text": self.raw_text,
+            "image": self.raw_image,
             "json": self.state,
         }.get(kind, self.state)
         path = target_dir / f"{artifact_id}{extension}"

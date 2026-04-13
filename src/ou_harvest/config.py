@@ -25,6 +25,11 @@ class ReviewConfig(BaseModel):
     confidence_threshold: float = 0.78
 
 
+class DemographicsConfig(BaseModel):
+    enabled: bool = False
+    detector_backend: str = "retinaface"
+
+
 class AppConfig(BaseModel):
     university: str = "openu"
     start_url: str = "https://www.openu.ac.il/staff/pages/default.aspx"
@@ -51,6 +56,7 @@ class AppConfig(BaseModel):
             api_key_env="OPENAI_API_KEY",
         )
     )
+    demographics: DemographicsConfig = Field(default_factory=DemographicsConfig)
     review: ReviewConfig = Field(default_factory=ReviewConfig)
     _source_path: Path | None = PrivateAttr(default=None)
 
@@ -148,6 +154,10 @@ class AppConfig(BaseModel):
             f"base_url = {_toml_value(self.openai.base_url)}",
             f"model = {_toml_value(self.openai.model)}",
             f"api_key_env = {_toml_value(self.openai.api_key_env)}",
+            "",
+            "[demographics]",
+            f"enabled = {_toml_value(self.demographics.enabled)}",
+            f"detector_backend = {_toml_value(self.demographics.detector_backend)}",
             "",
             "[review]",
             f"confidence_threshold = {_toml_value(self.review.confidence_threshold)}",

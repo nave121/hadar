@@ -86,6 +86,7 @@ class TechnionMedAdapter(UniversityAdapter):
         """Parse a Technion profile page for personal data."""
         soup = BeautifulSoup(html, "html.parser")
         name = self._extract_name(soup)
+        photo_url = self.extract_photo_url(html, page_url)
         contacts = self._extract_contacts(soup)
         links = self._extract_links(soup, page_url)
         rank = _extract_rank(name or "")
@@ -106,10 +107,21 @@ class TechnionMedAdapter(UniversityAdapter):
         return PersonalPageData(
             name=name,
             rank=rank,
+            photo_url=photo_url,
             contacts=_dedupe_contacts(contacts),
             links=_dedupe_links(links),
             source_evidence=source_evidence,
         )
+
+    def extract_photo_url(self, html: str, page_url: str) -> str | None:
+        soup = BeautifulSoup(html, "html.parser")
+        image_tag = soup.select_one(".departmets-box img[src*='wp-content/uploads']")
+        if image_tag is None:
+            return None
+        src = image_tag.get("src", "").strip()
+        if "wp-content/uploads" not in src:
+            return None
+        return urljoin(page_url, src)
 
     def classify_link(self, url: str, label: str) -> str:
         lowered_url = url.lower()
@@ -180,6 +192,7 @@ class TechnionMedAdapter(UniversityAdapter):
         email = next((c.value for c in contacts if c.kind == "email"), None)
         person_id = PersonRecord.create_id(name, email)
         rank = _extract_rank(name)
+        photo_url = self.extract_photo_url(html, page_url)
 
         links = self._extract_links(soup, page_url)
         bio_text = self._extract_bio_text(soup)
@@ -206,6 +219,7 @@ class TechnionMedAdapter(UniversityAdapter):
             contacts=_dedupe_contacts(contacts),
             org_affiliations=[affiliation],
             current_rank=rank,
+            photo_url=photo_url,
             links=_dedupe_links(links),
             source_evidence=evidence,
         )

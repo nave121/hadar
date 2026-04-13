@@ -6,3 +6,4 @@ data/
 photo_test/.venv/
 .DS_Store
 .claude/
+.pi/

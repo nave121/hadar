@@ -11,9 +11,10 @@ Currently supported connectors: Open University of Israel (`openu`), Ben-Gurion 
 - Deterministic scraping first — structured fields are extracted by HTML parsers, not LLMs
 - Normalized nested JSON as the canonical output (`PersonRecord`)
 - Incremental reruns with content fingerprints — unchanged pages are skipped
+- Optional demographics analysis for public profile photos when explicitly enabled and run
 - Optional LLM enrichment only for public professional fields that appear in crawled university pages, linked CRIS pages, or public CV files
 
-The code intentionally does not model or infer sensitive personal traits.
+The default crawl/parse flow only captures public profile content. Demographics inference is an optional, separate stage that runs only when explicitly enabled or invoked.
 
 ## Supported data
 
@@ -47,6 +48,7 @@ ou_harvest doctor --config ou_harvest.toml
 ou_harvest discover --config ou_harvest.toml
 ou_harvest crawl --config ou_harvest.toml
 ou_harvest parse --config ou_harvest.toml
+ou_harvest demographics --config ou_harvest.toml
 ou_harvest enrich --config ou_harvest.toml --provider ollama
 ou_harvest enrich --config ou_harvest.toml --provider openai
 ou_harvest review --config ou_harvest.toml --json
@@ -77,11 +79,12 @@ Keybindings: `q` quit, `r` refresh data, `c` cancel run.
 | **discover** | Fetches the staff directory landing page, extracts result page links and department links, merges with `seed_result_urls` from config |
 | **crawl** | Follows result page links with pagination. Fetches linked personal pages, CVs (PDF), and CRIS pages. All content stored as content-addressed artifacts in `data/raw/` |
 | **parse** | Reads stored HTML artifacts, routes through the appropriate parser (results page vs personal page), merges records by `person_id`. PDFs are text-extracted and attached as artifacts |
+| **demographics** | Analyzes downloaded profile photos with DeepFace and stores demographic estimates on records that have image artifacts |
 | **enrich** | Sends profile text and CV text (chunked at ~10k chars) to an LLM extractor. Extracts education, appointments, publications, awards, academic service, and notable links. Low-confidence results get review flags |
 | **review** | Collects records below the confidence threshold or with review flags into `data/review/queue.json` |
 | **export** | Writes `data/exports/people.json` or `people.jsonl` |
 
-Stages are idempotent. Running `crawl` without a prior `discover` will trigger discovery automatically. The `enrich` stage can be re-run with a different provider.
+Stages are idempotent. Running `crawl` without a prior `discover` will trigger discovery automatically. The `demographics` and `enrich` stages can be re-run independently.
 
 ## Configuration reference
 
@@ -117,6 +120,13 @@ All settings live in `ou_harvest.toml` (TOML format). See `ou_harvest.toml.examp
 | `model` | string | `gpt-4.1-mini` | Model name |
 | `api_key_env` | string or null | `OPENAI_API_KEY` | Environment variable name for the API key |
 
+### [demographics]
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Include the demographics stage in `full_run()` |
+| `detector_backend` | string | `retinaface` | DeepFace detector backend passed to photo analysis |
+
 ### [review]
 
 | Field | Type | Default | Description |
@@ -130,6 +140,7 @@ data/
   raw/
     html/          # Downloaded HTML pages (content-addressed by SHA256 prefix)
     pdf/           # Downloaded PDF files (CVs)
+    image/         # Downloaded profile photos
     text/          # Extracted text from PDFs
   records/         # Canonical PersonRecord JSON documents (one per person)
   review/          # Review flags and queue.json
@@ -171,6 +182,7 @@ Install extras as needed:
 
 | Extra | Packages | Purpose |
 |-------|----------|---------|
+| `demographics` | deepface>=0.0.93, tf-keras>=2.16, opencv-python>=4.9 | Static image demographic analysis |
 | `tui` | textual>=0.52 | Full-screen terminal UI |
 | `playwright` | playwright>=1.44 | Browser-rendered page fetching (for JS-heavy pages) |
 | `pdf` | pdfplumber>=0.11, pypdf>=4.2 | PDF text extraction from CV files |

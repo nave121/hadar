@@ -15,6 +15,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("discover")
     subparsers.add_parser("crawl")
     subparsers.add_parser("parse")
+    subparsers.add_parser("demographics")
     subparsers.add_parser("doctor")
     subparsers.add_parser("tui")
 
@@ -43,6 +44,9 @@ def main() -> None:
         print(json.dumps({"crawled_urls": urls}, ensure_ascii=False, indent=2))
     elif args.command == "parse":
         records = runner.parse()
+        print(json.dumps({"records": len(records)}, ensure_ascii=False, indent=2))
+    elif args.command == "demographics":
+        records = runner.analyze_demographics()
         print(json.dumps({"records": len(records)}, ensure_ascii=False, indent=2))
     elif args.command == "enrich":
         records = runner.enrich(args.provider)

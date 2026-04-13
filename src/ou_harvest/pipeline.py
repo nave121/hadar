@@ -5,14 +5,16 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from .config import AppConfig
+from .demographics import analyze_photo
 
 logger = logging.getLogger(__name__)
 from .events import EventSink, RunCancelled, RunEvent
-from .http import FetchResult, guess_fetcher
+from .http import FetchResult, RequestsFetcher, guess_fetcher
 from .llm import build_extractor
 from .models import (
     AcademicServiceEntry,
     AppointmentEntry,
+    Artifact,
     AwardEntry,
     DiscoveryLink,
     DiscoverySnapshot,
@@ -43,6 +45,7 @@ class OuHarvestPipeline:
         self.adapter = get_adapter(config.university)
         self.storage = Storage(config.output_path)
         self.fetcher = guess_fetcher(config, force_playwright=self.adapter.requires_playwright())
+        self.binary_fetcher = RequestsFetcher(config)
         self.event_sink = event_sink
         self.should_cancel = should_cancel or (lambda: False)
         self.secret_store = secret_store or SecretStore()
@@ -141,6 +144,11 @@ class OuHarvestPipeline:
                 crawled_count=len(crawled_urls),
             )
             result_page = self.adapter.parse_results_page(fetched.text, fetched.url)
+            for person in result_page.people:
+                if person.photo_url:
+                    photo_artifact = self._download_photo(person.photo_url, seen)
+                    if photo_artifact is not None:
+                        crawled_urls.append(photo_artifact.source_url)
             for next_url in result_page.pagination_urls:
                 if next_url not in seen:
                     queue.append(next_url)
@@ -189,6 +197,11 @@ class OuHarvestPipeline:
                 # Follow CV/PDF links found on personal pages
                 if kind == "html":
                     page_data = self.adapter.parse_personal_page(personal_fetch.text, personal_fetch.url)
+                    photo_url = page_data.photo_url or self.adapter.extract_photo_url(personal_fetch.text, personal_fetch.url)
+                    if photo_url:
+                        photo_artifact = self._download_photo(photo_url, seen)
+                        if photo_artifact is not None:
+                            crawled_urls.append(photo_artifact.source_url)
                     cv_links = [link.url for link in page_data.links if link.kind == "cv"]
                     for cv_url in cv_links:
                         self._check_cancel("crawl")
@@ -207,6 +220,7 @@ class OuHarvestPipeline:
                             self._emit("artifact_saved", stage="crawl", message="Saved CV artifact", url=cv_fetch.url, artifact_path=cv_artifact.path, crawled_count=len(crawled_urls))
                         except Exception as exc:
                             self._emit("log", stage="crawl", message=f"Failed to fetch CV: {exc}", url=cv_url)
+        self._reverse_checksum_map = None
         self.storage.flush_fingerprints()
         self.storage.save_json("state/crawl_manifest.json", {"urls": crawled_urls})
         self._emit("log", stage="crawl", message="Crawl completed", crawled_count=len(crawled_urls))
@@ -262,6 +276,7 @@ class OuHarvestPipeline:
                 updated = linked_record.model_copy(deep=True)
                 if page.rank and not updated.current_rank:
                     updated.current_rank = page.rank
+                updated.photo_url = page.photo_url or updated.photo_url
                 updated.contacts = _dedupe_by_key(
                     updated.contacts + page.contacts, key=lambda item: (item.kind, item.value)
                 )
@@ -318,6 +333,17 @@ class OuHarvestPipeline:
                 )
             )
             records[updated.person_id] = updated
+
+        for person_id, record in list(records.items()):
+            if not record.photo_url:
+                continue
+            photo_artifact = self._artifact_for_url(record.photo_url, kind="image")
+            if photo_artifact is None:
+                continue
+            updated = record.model_copy(deep=True)
+            _append_unique_model(updated.artifacts, photo_artifact, key=lambda item: item.artifact_id)
+            updated.photo_artifact_id = photo_artifact.artifact_id
+            records[person_id] = updated
 
         for record in records.values():
             self.storage.save_record(record)
@@ -455,6 +481,67 @@ class OuHarvestPipeline:
         )
         return updated_records
 
+    def analyze_demographics(self) -> list[PersonRecord]:
+        detector_backend = self.config.demographics.detector_backend
+        all_records = self._scoped_records()
+        total_records = len(all_records)
+        updated_records: list[PersonRecord] = []
+        analyzed_count = 0
+        skipped = 0
+
+        for record_index, record in enumerate(all_records):
+            self._check_cancel("demographics")
+            if record.demographics is not None:
+                skipped += 1
+                updated_records.append(record)
+                continue
+
+            image_artifact = self._select_photo_artifact(record)
+            if image_artifact is None:
+                skipped += 1
+                updated_records.append(record)
+                continue
+
+            image_path = Path(image_artifact.path)
+            if not image_path.exists():
+                skipped += 1
+                updated_records.append(record)
+                continue
+
+            self._emit(
+                "progress",
+                stage="demographics",
+                message="Analyzing photo artifact",
+                person_id=record.person_id,
+                full_name=record.full_name,
+                artifact_id=image_artifact.artifact_id,
+                current=record_index,
+                total=total_records,
+            )
+            estimate = analyze_photo(image_path, detector_backend=detector_backend)
+            if estimate is None:
+                skipped += 1
+                updated_records.append(record)
+                continue
+
+            updated = record.model_copy(deep=True)
+            updated.demographics = estimate.model_copy(
+                update={"source_artifact_id": estimate.source_artifact_id or image_artifact.artifact_id}
+            )
+            self.storage.save_record(updated)
+            updated_records.append(updated)
+            analyzed_count += 1
+
+        self._emit(
+            "log",
+            stage="demographics",
+            message="Demographics analysis completed",
+            record_count=len(updated_records),
+            analyzed_count=analyzed_count,
+            skipped=skipped,
+        )
+        return updated_records
+
     def export(self, fmt: str) -> Path:
         records = self._scoped_records()
         if fmt == "json":
@@ -496,6 +583,86 @@ class OuHarvestPipeline:
                 by_checksum[prefix] = url
             self._reverse_checksum_map = by_checksum
         return self._reverse_checksum_map.get(checksum_prefix)
+
+    def _download_photo(self, photo_url: str, seen: set[str]) -> Artifact | None:
+        if photo_url in seen:
+            return None
+        seen.add(photo_url)
+        try:
+            self._emit("progress", stage="crawl", message="Fetching linked photo", url=photo_url)
+            fetched = self.binary_fetcher.fetch(photo_url)
+        except Exception as exc:
+            self._emit("log", stage="crawl", message=f"Failed to fetch photo: {exc}", url=photo_url)
+            return None
+
+        content_type = (fetched.content_type or "").split(";", 1)[0].strip().lower()
+        if not content_type.startswith("image/"):
+            self._emit(
+                "log",
+                stage="crawl",
+                message="Skipping non-image photo response",
+                url=photo_url,
+                content_type=fetched.content_type,
+            )
+            return None
+
+        artifact = self.storage.write_artifact(
+            kind="image",
+            source_url=photo_url,
+            content=fetched.content,
+            content_type=fetched.content_type,
+        )
+        self.storage.update_fingerprint(photo_url, artifact.checksum)
+        if fetched.url != photo_url:
+            self.storage.update_fingerprint(fetched.url, artifact.checksum)
+        self._emit(
+            "artifact_saved",
+            stage="crawl",
+            message="Saved photo artifact",
+            url=photo_url,
+            artifact_path=artifact.path,
+            artifact_id=artifact.artifact_id,
+        )
+        return artifact
+
+    def _artifact_for_url(self, source_url: str, *, kind: str) -> Artifact | None:
+        fingerprints = self.storage.load_json("state/fingerprints.json", default={})
+        checksum = fingerprints.get(source_url)
+        if not checksum:
+            return None
+
+        target_dir = {
+            "html": self.storage.raw_html,
+            "pdf": self.storage.raw_pdf,
+            "text": self.storage.raw_text,
+            "image": self.storage.raw_image,
+        }.get(kind)
+        if target_dir is None:
+            return None
+
+        matches = sorted(target_dir.glob(f"{checksum[:16]}.*"))
+        if not matches:
+            return None
+
+        path = matches[0]
+        return Artifact(
+            artifact_id=checksum[:16],
+            kind=kind,
+            source_url=source_url,
+            path=str(path),
+            checksum=checksum,
+            content_type=_content_type_for_suffix(path.suffix),
+        )
+
+    def _select_photo_artifact(self, record: PersonRecord) -> Artifact | None:
+        if record.photo_artifact_id:
+            for artifact in record.artifacts:
+                if artifact.artifact_id == record.photo_artifact_id:
+                    return artifact
+        for artifact in record.artifacts:
+            if artifact.kind == "image":
+                return artifact
+        return None
 
     def _merge_record(self, current: PersonRecord | None, incoming: PersonRecord) -> PersonRecord:
         if current is None:
@@ -882,3 +1049,16 @@ def _chunk_text(text: str, max_chars: int = 6000) -> list[str]:
     if current:
         chunks.append("\n\n".join(current))
     return chunks
+
+
+def _content_type_for_suffix(suffix: str) -> str | None:
+    return {
+        ".html": "text/html",
+        ".pdf": "application/pdf",
+        ".txt": "text/plain",
+        ".json": "application/json",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".webp": "image/webp",
+    }.get(suffix.lower())

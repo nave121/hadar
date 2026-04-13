@@ -40,12 +40,27 @@ class LinkRecord(BaseModel):
 
 class Artifact(BaseModel):
     artifact_id: str
-    kind: Literal["html", "pdf", "text", "json"]
+    kind: Literal["html", "pdf", "text", "json", "image"]
     source_url: str
     path: str
     checksum: str
     content_type: str | None = None
     fetched_at: str = Field(default_factory=utc_now)
+
+
+class DemographicEstimate(BaseModel):
+    dominant_gender: str | None = None
+    gender_scores: dict[str, float] = Field(default_factory=dict)
+    dominant_race: str | None = None
+    race_scores: dict[str, float] = Field(default_factory=dict)
+    estimated_age: int | None = None
+    dominant_emotion: str | None = None
+    emotion_scores: dict[str, float] = Field(default_factory=dict)
+    face_confidence: float | None = None
+    face_region: dict[str, int] = Field(default_factory=dict)
+    detector_backend: str = "retinaface"
+    analyzed_at: str = Field(default_factory=utc_now)
+    source_artifact_id: str | None = None
 
 
 class OrgAffiliation(BaseModel):
@@ -119,6 +134,9 @@ class PersonRecord(BaseModel):
     academic_service: list[AcademicServiceEntry] = Field(default_factory=list)
     links: list[LinkRecord] = Field(default_factory=list)
     notable_links: list[LinkRecord] = Field(default_factory=list)
+    photo_url: str | None = None
+    photo_artifact_id: str | None = None
+    demographics: DemographicEstimate | None = None
     artifacts: list[Artifact] = Field(default_factory=list)
     source_evidence: list[SourceEvidence] = Field(default_factory=list)
     review_flags: list[ReviewFlag] = Field(default_factory=list)
@@ -216,6 +234,9 @@ class PersonRecord(BaseModel):
         )
         payload["current_role"] = other.current_role or self.current_role
         payload["current_rank"] = other.current_rank or self.current_rank
+        payload["photo_url"] = other.photo_url or self.photo_url
+        payload["photo_artifact_id"] = other.photo_artifact_id or self.photo_artifact_id
+        payload["demographics"] = _prefer_demographics(self.demographics, other.demographics)
         payload["confidence"] = min(self.confidence, other.confidence)
         payload["content_fingerprint"] = other.content_fingerprint or self.content_fingerprint
         payload["last_seen_at"] = utc_now()
@@ -280,6 +301,7 @@ class ResultPageData(BaseModel):
 class PersonalPageData(BaseModel):
     name: str | None = None
     rank: str | None = None
+    photo_url: str | None = None
     contacts: list[ContactPoint] = Field(default_factory=list)
     links: list[LinkRecord] = Field(default_factory=list)
     research_interests: list[str] = Field(default_factory=list)
@@ -300,3 +322,18 @@ def dedupe_models(items: list[BaseModel], key_fn) -> list[BaseModel]:
 
 def _dedupe_as_dicts(items: list[BaseModel], key_fn) -> list[dict]:
     return [item.model_dump() for item in dedupe_models(items, key_fn)]
+
+
+def _prefer_demographics(
+    current: DemographicEstimate | None,
+    incoming: DemographicEstimate | None,
+) -> DemographicEstimate | None:
+    if current is None:
+        return incoming
+    if incoming is None:
+        return current
+    current_confidence = current.face_confidence if current.face_confidence is not None else -1.0
+    incoming_confidence = incoming.face_confidence if incoming.face_confidence is not None else -1.0
+    if incoming_confidence >= current_confidence:
+        return incoming
+    return current

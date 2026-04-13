@@ -40,6 +40,9 @@ class UniversityAdapter(ABC):
     def classify_link(self, url: str, label: str) -> str:
         """Classify a link found on a page (cv, personal_page, scholar, cris, publication, external)."""
 
+    def extract_photo_url(self, html: str, page_url: str) -> str | None:
+        return None
+
     def requires_playwright(self) -> bool:
         """Return True if this university's site requires a full browser to scrape."""
         return False

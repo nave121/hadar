@@ -50,6 +50,10 @@ class PipelineRunner:
         self.clear_cancel()
         return self._run_stage("parse", lambda pipeline: pipeline.parse())
 
+    def analyze_demographics(self):
+        self.clear_cancel()
+        return self._run_stage("demographics", lambda pipeline: pipeline.analyze_demographics())
+
     def enrich(self, provider_name: str):
         self.clear_cancel()
         return self._run_stage("enrich", lambda pipeline: pipeline.enrich(provider_name), provider=provider_name)
@@ -74,6 +78,10 @@ class PipelineRunner:
         results["parse"] = self._run_stage("parse", lambda pipeline: pipeline.parse())
         if self._cancel_event.is_set():
             raise RunCancelled("Run cancelled after parse")
+        if self.config.demographics.enabled:
+            results["demographics"] = self._run_stage("demographics", lambda pipeline: pipeline.analyze_demographics())
+            if self._cancel_event.is_set():
+                raise RunCancelled("Run cancelled after demographics")
         if enrich_provider:
             results["enrich"] = self._run_stage(
                 "enrich", lambda pipeline: pipeline.enrich(enrich_provider), provider=enrich_provider
@@ -166,7 +174,7 @@ class PipelineRunner:
             }
         if stage == "crawl":
             return {"crawled_count": len(result)}
-        if stage in {"parse", "enrich"}:
+        if stage in {"parse", "demographics", "enrich"}:
             return {"record_count": len(result)}
         if stage == "review":
             return {"review_queue_count": len(result)}

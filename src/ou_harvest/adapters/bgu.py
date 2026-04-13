@@ -39,7 +39,7 @@ class BguAdapter(UniversityAdapter):
     name = "bgu"
     display_name = "Ben-Gurion University"
     default_start_url = "https://www.bgu.ac.il/people/"
-    default_allowed_domains = ["bgu.ac.il", "www.bgu.ac.il", "in.bgu.ac.il"]
+    default_allowed_domains = ["bgu.ac.il", "www.bgu.ac.il", "in.bgu.ac.il", "apps4cloud.bgu.ac.il"]
 
     def requires_playwright(self) -> bool:
         return True
@@ -121,6 +121,7 @@ class BguAdapter(UniversityAdapter):
         profile_root = self._select_profile_root(soup)
         profile_text = normalize_space(profile_root.get_text("\n", strip=True))
         name = self._extract_profile_name(profile_root, soup)
+        photo_url = self.extract_photo_url(html, page_url)
 
         contacts = self._extract_profile_contacts(profile_root)
         links = self._extract_profile_links(profile_root, page_url)
@@ -129,11 +130,17 @@ class BguAdapter(UniversityAdapter):
         return PersonalPageData(
             name=name,
             rank=rank,
+            photo_url=photo_url,
             contacts=_dedupe_contacts(contacts),
             links=_dedupe_links(links),
             research_interests=[],
             source_evidence=source_evidence,
         )
+
+    def extract_photo_url(self, html: str, page_url: str) -> str | None:
+        soup = BeautifulSoup(html, "html.parser")
+        image_tag = soup.select_one("figure.profile-image img")
+        return self._normalize_photo_url(image_tag.get("src"), page_url) if image_tag is not None else None
 
     def classify_link(self, url: str, label: str) -> str:
         lowered_url = url.lower()
@@ -194,6 +201,10 @@ class BguAdapter(UniversityAdapter):
             contacts.append(ContactPoint(kind="email", value=email))
 
         profile_url = urljoin(page_url, href)
+        photo_url = None
+        image_tag = card.select_one("div.member-image > img")
+        if image_tag is not None:
+            photo_url = self._normalize_photo_url(image_tag.get("src"), page_url)
         person_id = PersonRecord.create_id(full_name, email)
         rank = current_rank or _extract_rank(full_name)
 
@@ -222,6 +233,7 @@ class BguAdapter(UniversityAdapter):
             contacts=contacts,
             org_affiliations=[affiliation],
             current_rank=rank,
+            photo_url=photo_url,
             links=_dedupe_links(links),
             source_evidence=evidence,
         )
@@ -461,6 +473,14 @@ class BguAdapter(UniversityAdapter):
             for line in tag.get_text("\n", strip=True).splitlines()
             if normalize_space(line)
         ]
+
+    def _normalize_photo_url(self, raw_url: str | None, page_url: str) -> str | None:
+        if not raw_url:
+            return None
+        photo_url = urljoin(page_url, raw_url.strip())
+        if "no-profile.png" in photo_url.lower():
+            return None
+        return photo_url
 
     def _load_page_data(self) -> dict | None:
         try:
