@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from urllib.parse import urljoin
+
+from bs4 import BeautifulSoup
+
 from ..models import DiscoveryLink, DiscoverySnapshot, PersonalPageData, ResultPageData
 from ..parsers import (
     classify_link as _classify_link,
@@ -58,3 +62,16 @@ class OpenUniversityAdapter(UniversityAdapter):
 
     def classify_link(self, url: str, label: str) -> str:
         return _classify_link(url, label)
+
+    def extract_photo_url(self, html: str, page_url: str) -> str | None:
+        soup = BeautifulSoup(html, "html.parser")
+        figure = soup.find("figure")
+        if not figure:
+            return None
+        img = figure.find("img")
+        if not img or not img.get("src"):
+            return None
+        src = img["src"]
+        if "Avatar-General" in src:
+            return None
+        return urljoin(page_url, src)

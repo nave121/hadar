@@ -4,6 +4,7 @@ import pytest
 
 from ou_harvest.adapters import available_adapters, get_adapter
 from ou_harvest.adapters.base import UniversityAdapter
+from ou_harvest.models import DiscoveryFilterGroup, DiscoveryOption, DiscoverySnapshot
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -230,13 +231,97 @@ def test_technion_parse_profile_page():
     assert person.photo_url == "https://md.technion.ac.il/wp-content/uploads/2020/08/ciehanover-250x375.jpg"
 
 
-def test_openu_extract_photo_url_returns_none():
+def test_openu_extract_photo_url_returns_none_without_figure():
     adapter = get_adapter("openu")
 
     assert adapter.extract_photo_url(
         "<html><body><img src=\"/media/photo.jpg\"></body></html>",
         "https://www.openu.ac.il/staff/pages/results.aspx?unit=311",
     ) is None
+
+
+def test_openu_extract_photo_url_returns_url_from_figure():
+    adapter = get_adapter("openu")
+    html = (FIXTURES / "personal_page.html").read_text(encoding="utf-8")
+
+    url = adapter.extract_photo_url(html, "https://www.openu.ac.il/en/personalsites/OrenBarkan.aspx")
+
+    assert url == "https://www.openu.ac.il/Lists/MediaServer_Images/PersonalSites/OrenBarkan.jpg"
+
+
+def test_openu_extract_photo_url_filters_avatar_placeholder():
+    adapter = get_adapter("openu")
+    html = (FIXTURES / "openu_personal_page_no_photo.html").read_text(encoding="utf-8")
+
+    url = adapter.extract_photo_url(html, "https://www.openu.ac.il/en/personalsites/test.aspx")
+
+    assert url is None
+
+
+def test_openu_adapter_does_not_require_playwright():
+    adapter = get_adapter("openu")
+    assert adapter.requires_playwright() is False
+
+
+def test_openu_classify_link_orcid():
+    adapter = get_adapter("openu")
+    assert adapter.classify_link("https://orcid.org/0000-0002-1234-5678", "ORCID") == "orcid"
+
+
+def test_openu_classify_link_scopus():
+    adapter = get_adapter("openu")
+    assert adapter.classify_link("https://www.scopus.com/authid/detail.uri?authorId=123", "Scopus") == "scopus"
+
+
+def test_openu_classify_link_pubmed():
+    adapter = get_adapter("openu")
+    assert adapter.classify_link("https://pubmed.ncbi.nlm.nih.gov/?term=test", "PubMed") == "pubmed"
+
+
+def test_openu_generate_result_links_creates_cartesian_product():
+    adapter = get_adapter("openu")
+    snapshot = DiscoverySnapshot(
+        start_url="https://www.openu.ac.il/staff/pages/default.aspx",
+        available_filters=[
+            DiscoveryFilterGroup(key="unit", label="Units", options=[
+                DiscoveryOption(code="307", label="CS"),
+                DiscoveryOption(code="311", label="Edu"),
+            ]),
+            DiscoveryFilterGroup(key="staff_type", label="Staff", options=[
+                DiscoveryOption(code="10", label="Senior"),
+                DiscoveryOption(code="20", label="Teaching"),
+            ]),
+        ],
+    )
+
+    links = adapter.generate_result_links(snapshot, {})
+
+    assert len(links) == 4
+    urls = {link.url for link in links}
+    assert "https://www.openu.ac.il/staff/pages/results.aspx?unit=307&staff=10" in urls
+    assert "https://www.openu.ac.il/staff/pages/results.aspx?unit=311&staff=20" in urls
+
+
+def test_openu_generate_result_links_respects_selected_filters():
+    adapter = get_adapter("openu")
+    snapshot = DiscoverySnapshot(
+        start_url="https://www.openu.ac.il/staff/pages/default.aspx",
+        available_filters=[
+            DiscoveryFilterGroup(key="unit", label="Units", options=[
+                DiscoveryOption(code="307", label="CS"),
+                DiscoveryOption(code="311", label="Edu"),
+            ]),
+            DiscoveryFilterGroup(key="staff_type", label="Staff", options=[
+                DiscoveryOption(code="10", label="Senior"),
+                DiscoveryOption(code="20", label="Teaching"),
+            ]),
+        ],
+    )
+
+    links = adapter.generate_result_links(snapshot, {"unit": ["307"]})
+
+    assert len(links) == 2
+    assert all("unit=307" in link.url for link in links)
 
 
 @pytest.mark.parametrize(

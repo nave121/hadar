@@ -128,6 +128,8 @@ def parse_personal_page(html: str, page_url: str) -> PersonalPageData:
             name = normalize_space(tag.get_text(" ", strip=True))
             break
 
+    photo_url = _extract_figure_photo(soup, page_url)
+
     links: list[LinkRecord] = []
     research_interests: list[str] = []
     source_evidence: list[SourceEvidence] = []
@@ -162,6 +164,7 @@ def parse_personal_page(html: str, page_url: str) -> PersonalPageData:
         links=_dedupe_links(links),
         research_interests=sorted(set(research_interests)),
         source_evidence=source_evidence,
+        photo_url=photo_url,
     )
 
 
@@ -598,6 +601,12 @@ def classify_link(url: str, label: str) -> str:
         return "scholar"
     if "cris" in lowered_url:
         return "cris"
+    if "orcid.org" in lowered_url:
+        return "orcid"
+    if "scopus.com" in lowered_url:
+        return "scopus"
+    if "pubmed" in lowered_url:
+        return "pubmed"
     if "academic.openu.ac.il" in lowered_url:
         return "department_page"
     return "external"
@@ -671,6 +680,20 @@ def _dedupe_contacts(contacts: list[ContactPoint]) -> list[ContactPoint]:
         seen.add(key)
         result.append(contact)
     return result
+
+
+def _extract_figure_photo(soup: BeautifulSoup, page_url: str) -> str | None:
+    """Extract a profile photo from a <figure><img> pattern, filtering placeholders."""
+    figure = soup.find("figure")
+    if not figure:
+        return None
+    img = figure.find("img")
+    if not img or not img.get("src"):
+        return None
+    src = img["src"]
+    if "Avatar-General" in src:
+        return None
+    return urljoin(page_url, src)
 
 
 def _extract_select_options(soup: BeautifulSoup, name_matcher) -> list[DiscoveryOption]:

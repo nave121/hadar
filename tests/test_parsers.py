@@ -103,3 +103,36 @@ def test_parse_results_page_normalizes_legacy_openu_dev_personal_page_links():
     personal_links = [link for link in page.people[0].links if link.kind == "personal_page"]
     assert len(personal_links) == 1
     assert personal_links[0].url == "https://www.openu.ac.il/personal_sites/orit-naor-elaiza.html"
+
+
+def test_parse_personal_page_extracts_photo_url_from_figure():
+    html = (FIXTURES / "personal_page.html").read_text(encoding="utf-8")
+    page = parse_personal_page(html, "https://www.openu.ac.il/en/personalsites/OrenBarkan.aspx")
+
+    assert page.photo_url == "https://www.openu.ac.il/Lists/MediaServer_Images/PersonalSites/OrenBarkan.jpg"
+
+
+def test_parse_personal_page_ignores_avatar_placeholder():
+    html = (FIXTURES / "openu_personal_page_no_photo.html").read_text(encoding="utf-8")
+    page = parse_personal_page(html, "https://www.openu.ac.il/en/personalsites/test.aspx")
+
+    assert page.photo_url is None
+
+
+def test_parse_personal_page_extracts_orcid_link():
+    html = (FIXTURES / "personal_page.html").read_text(encoding="utf-8")
+    page = parse_personal_page(html, "https://www.openu.ac.il/en/personalsites/OrenBarkan.aspx")
+
+    orcid_links = [link for link in page.links if link.kind == "orcid"]
+    assert len(orcid_links) == 1
+    assert "orcid.org" in orcid_links[0].url
+
+
+def test_parse_results_page_extracts_orcid_link():
+    html = (FIXTURES / "results_page.html").read_text(encoding="utf-8")
+    page = parse_results_page(html, "https://www.openu.ac.il/staff/pages/results.aspx?unit=311")
+
+    person = page.people[0]
+    orcid_links = [link for link in person.links if link.kind == "orcid"]
+    assert len(orcid_links) == 1
+    assert "orcid.org" in orcid_links[0].url
