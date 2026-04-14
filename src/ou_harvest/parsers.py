@@ -682,22 +682,52 @@ def _dedupe_contacts(contacts: list[ContactPoint]) -> list[ContactPoint]:
     return result
 
 
+_PHOTO_SKIP_PATTERNS = (
+    "avatar-general",
+    "logo",
+    "back-en",
+    "back-he",
+    "/icon",
+    "icon-o-",
+    "icpdf",
+    ".svg",
+    "spacer",
+    "empty.gif",
+    "pixel",
+    "1x1",
+    "favicon",
+    "gifs/logo",
+)
+
+
 def _extract_figure_photo(soup: BeautifulSoup, page_url: str) -> str | None:
     """Extract a profile photo from OpenU personal pages.
 
-    Real photos live in MediaServer_Images/PersonalSites/ with a
-    person-specific filename.  Placeholders use Avatar-General-*.jpg.
-    The parent element varies (<figure>, <div>, etc.) so we match by
-    src pattern rather than container tag.
+    OpenU personal pages have no standard template — staff can use the
+    SharePoint aspx template (photos in MediaServer_Images/PersonalSites/)
+    or fully custom HTML (photos as relative paths like ``ricagonen1.gif``).
+    This function picks the first image that looks like a portrait by
+    filtering out known site-chrome images (logos, icons, back buttons,
+    PDF icons, avatar placeholders).
     """
     for img in soup.find_all("img"):
         src = img.get("src", "")
-        if "MediaServer_Images/PersonalSites/" not in src:
+        if not src:
             continue
-        if "logo" in src.lower():
+        lowered = src.lower()
+        if any(skip in lowered for skip in _PHOTO_SKIP_PATTERNS):
             continue
-        if "Avatar-General" in src:
-            continue
+        # Skip tiny tracking/decoration images by explicit dimensions
+        w = img.get("width", "")
+        h = img.get("height", "")
+        if w and h:
+            try:
+                nw = int(str(w).replace("px", ""))
+                nh = int(str(h).replace("px", ""))
+                if nw < 30 or nh < 30:
+                    continue
+            except ValueError:
+                pass
         return urljoin(page_url, src)
     return None
 

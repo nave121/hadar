@@ -53,6 +53,7 @@ def test_results_page_produces_records(connector, fixture, expected_min):
 
 @pytest.mark.parametrize("connector,fixture,has_photo", [
     ("openu", "personal_page.html", True),
+    ("openu", "openu_freeform_page.html", True),
     ("openu", "openu_personal_page_no_photo.html", False),
     ("bgu", "bgu_profile_nonbgu.html", False),
     ("technion_med", "technion_profile.html", True),

@@ -231,13 +231,16 @@ def test_technion_parse_profile_page():
     assert person.photo_url == "https://md.technion.ac.il/wp-content/uploads/2020/08/ciehanover-250x375.jpg"
 
 
-def test_openu_extract_photo_url_returns_none_without_figure():
+def test_openu_extract_photo_url_returns_none_for_chrome_only_page():
+    """A page with only site-chrome images (logo, icons) returns None."""
     adapter = get_adapter("openu")
+    html = """<html><body>
+        <img src="/_layouts/15/OpenU_WWW/Theming/Global/images/LOGO_OU_BLACK.svg">
+        <img src="/_layouts/15/images/icpdf.png" width="16" height="16">
+        <img src="/Personal_sites/gifs/logo.jpg" width="59" height="52">
+    </body></html>"""
 
-    assert adapter.extract_photo_url(
-        "<html><body><img src=\"/media/photo.jpg\"></body></html>",
-        "https://www.openu.ac.il/staff/pages/results.aspx?unit=311",
-    ) is None
+    assert adapter.extract_photo_url(html, "https://www.openu.ac.il/staff/pages/results.aspx") is None
 
 
 def test_openu_extract_photo_url_returns_url_from_figure():
@@ -256,6 +259,15 @@ def test_openu_extract_photo_url_filters_avatar_placeholder():
     url = adapter.extract_photo_url(html, "https://www.openu.ac.il/en/personalsites/test.aspx")
 
     assert url is None
+
+
+def test_openu_extract_photo_url_from_freeform_page():
+    adapter = get_adapter("openu")
+    html = (FIXTURES / "openu_freeform_page.html").read_text(encoding="utf-8")
+
+    url = adapter.extract_photo_url(html, "https://www.openu.ac.il/personal_sites/rica-gonen/index.html")
+
+    assert url == "https://www.openu.ac.il/personal_sites/rica-gonen/ricagonen1.gif"
 
 
 def test_openu_adapter_does_not_require_playwright():

@@ -64,14 +64,6 @@ class OpenUniversityAdapter(UniversityAdapter):
         return _classify_link(url, label)
 
     def extract_photo_url(self, html: str, page_url: str) -> str | None:
+        from ..parsers import _extract_figure_photo
         soup = BeautifulSoup(html, "html.parser")
-        for img in soup.find_all("img"):
-            src = img.get("src", "")
-            if "MediaServer_Images/PersonalSites/" not in src:
-                continue
-            if "logo" in src.lower():
-                continue
-            if "Avatar-General" in src:
-                continue
-            return urljoin(page_url, src)
-        return None
+        return _extract_figure_photo(soup, page_url)
