@@ -5,10 +5,11 @@
 #   .\setup.ps1               # install + doctor check
 #   .\setup.ps1 run           # full pipeline run (discover -> export)
 #   .\setup.ps1 tui           # launch the TUI
-#   .\setup.ps1 <stage>       # run a single stage (discover, crawl, parse, enrich, review, export)
+#   .\setup.ps1 <stage>       # run a single stage
 #   .\setup.ps1 test          # run tests
 #   .\setup.ps1 doctor        # check dependencies and config
 #
+Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $SCRIPT_DIR = Split-Path -Parent $MyInvocation.MyCommand.Definition
@@ -25,58 +26,108 @@ function Write-Bold ([string]$msg) { Write-Host $msg -ForegroundColor Cyan }
 
 # ---------- helpers ----------
 function Ensure-Python {
-    $py = $null
-    $candidates = @("python", "python3")
+    $candidates = @(
+        @{ Command = "py"; Args = @("-3") },
+        @{ Command = "python"; Args = @() },
+        @{ Command = "python3"; Args = @() }
+    )
+
     foreach ($c in $candidates) {
-        $cmd = Get-Command $c -ErrorAction SilentlyContinue
+        $cmd = Get-Command $c.Command -ErrorAction SilentlyContinue
         if ($cmd) {
-            $ver = & $c -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
-            $major = [int]($ver.Split('.')[0])
-            $minor = [int]($ver.Split('.')[1])
-            if ($major -ge 3 -and $minor -ge 11) {
-                $py = $c
-                break
+            try {
+                $ver = & $c.Command @($c.Args + @("-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")) 2>$null
+                if ($LASTEXITCODE -ne 0) {
+                    continue
+                }
+                $major = [int]($ver.Split('.')[0])
+                $minor = [int]($ver.Split('.')[1])
+                if (($major -gt 3) -or ($major -eq 3 -and $minor -ge 11)) {
+                    return [PSCustomObject]@{
+                        Command = $c.Command
+                        Args = $c.Args
+                    }
+                }
+            } catch {
+                continue
             }
         }
     }
-    if (-not $py) {
-        Write-Red "Python 3.11+ is required but not found."
-        exit 1
+
+    throw "Python 3.11+ is required but not found."
+}
+
+function Get-VenvPythonPath {
+    $candidates = @(
+        (Join-Path $VENV_DIR "Scripts\python.exe"),
+        (Join-Path $VENV_DIR "Scripts\python"),
+        (Join-Path $VENV_DIR "bin\python"),
+        (Join-Path $VENV_DIR "bin/python")
+    )
+
+    foreach ($path in $candidates) {
+        if (Test-Path $path) {
+            return $path
+        }
     }
-    return $py
+
+    return (Join-Path $VENV_DIR "Scripts\python.exe")
 }
 
 function Ensure-Venv {
-    if (-not (Test-Path $VENV_DIR)) {
+    $venvPython = Get-VenvPythonPath
+    if (-not (Test-Path $venvPython)) {
         Write-Bold "Creating virtual environment..."
         $py = Ensure-Python
-        & $py -m venv $VENV_DSS
-        $py_venv = Join-Path $VENV_DIR "Scripts\python.exe"
+        & $py.Command @($py.Args + @("-m", "venv", $VENV_DIR))
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to create virtual environment in $VENV_DIR"
+        }
+        $venvPython = Get-VenvPythonPath
+        if (-not (Test-Path $venvPython)) {
+            throw "Virtual environment was created, but Python executable was not found."
+        }
         Write-Green "Virtual environment created at $VENV_DIR"
     }
-    # Return the path to the python executable in venv
-    return Join-Path $VENV_DIR "Scripts\python.exe"
+
+    return $venvPython
+}
+
+function Invoke-OuHarvest ([string]$py_exe, [string[]]$CliArgs) {
+    & $py_exe -m ou_harvest.cli --config $CONFIG @CliArgs
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
 }
 
 function Ensure-Installed ([string]$py_exe) {
-    if (-not ( & $py_exe -c "import ou_harvest" 2>$null )) {
+    & $py_exe -c "import ou_harvest" 2>$null
+    if ($LASTEXITCODE -ne 0) {
         Write-Bold "Installing ou-harvest with all extras..."
         & $py_exe -m pip install --upgrade pip --quiet
         & $py_exe -m pip install -e ".[tui,playwright,pdf]" --quiet
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to install ou-harvest into $VENV_DIR"
+        }
         Write-Green "Package installed."
     }
     return $py_exe
 }
 
 function Ensure-Playwright ([string]$py_exe) {
-    if (& $py_exe -c "import playwright" 2>$format) {
-        # On Windows, we check user cache or local app data
-        $playwright_cache = [System.Environment]::GetFolderPath("LocalApplicationData") + "\ms-playwright"
-        if (-not (Test-Path $playwright_cache)) {
-            Write-Bold "Installing Playwright Chromium browser..."
-            & $py_exe -m playwright install chromium
-            Write-Green "Playwright Chromium installed."
+    & $py_exe -c "import playwright" 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        return
+    }
+
+    $playwrightCache = Join-Path ([System.Environment]::GetFolderPath("LocalApplicationData")) "ms-playwright"
+    if (-not (Test-Path $playwrightCache)) {
+        Write-Bold "Installing Playwright Chromium browser..."
+        & $py_exe -m playwright install chromium
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to install Playwright Chromium."
         }
+        Write-Green "Playwright Chromium installed."
     }
 }
 
@@ -92,33 +143,61 @@ function Ensure-Config {
     }
 }
 
+function Get-EnabledProvider {
+    if (-not (Test-Path $CONFIG)) {
+        return $null
+    }
+
+    $configContent = Get-Content $CONFIG -Raw
+    if ([regex]::IsMatch($configContent, '(?s)\[ollama\].*?enabled\s*=\s*true')) {
+        return "ollama"
+    }
+    if ([regex]::IsMatch($configContent, '(?s)\[openai\].*?enabled\s*=\s*true')) {
+        return "openai"
+    }
+
+    return $null
+}
+
+function Test-DemographicsEnabled {
+    if (-not (Test-Path $CONFIG)) {
+        return $false
+    }
+
+    $configContent = Get-Content $CONFIG -Raw
+    return [regex]::IsMatch($configContent, '(?s)\[demographics\].*?enabled\s*=\s*true')
+}
+
 # ---------- commands ----------
 function Cmd-Install ([string]$py_exe) {
     $py_exe = Ensure-Installed $py_exe
     Ensure-Playwright $py_exe
     Ensure-Config
     Write-Bold "Running doctor..."
-    & $py_exe -m ou_harvest --config $CONFIG doctor
-    Write-Green "`nSetup complete. Run '.\setup.ps1 tui' or '.\setup ps1 run' to start."
+    Invoke-OuHarvest $py_exe @("doctor")
+    Write-Green "`nSetup complete. Run '.\setup.ps1 tui' or '.\setup.ps1 run' to start."
 }
 
 function Cmd-Doctor ([string]$py_exe) {
     $py_exe = Ensure-Installed $py_exe
     Ensure-Config
-    & $py_exe -m ou_harvest --config $CONFIG doctor
+    Invoke-OuHarvest $py_exe @("doctor")
 }
 
-function Cmd-Test ([string]$py_exe) {
+function Cmd-Test ([string]$py_exe, [string[]]$ExtraArgs = @()) {
     $py_exe = Ensure-Installed $py_exe
     & $py_exe -m pip install pytest --quiet
     Write-Bold "Running tests..."
-    & $py_exe -m pytest tests/ -v $args
+    & $py_exe -m pytest tests/ -v @ExtraArgs
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
 }
 
 function Cmd-Tui ([string]$py_exe) {
     $py_exe = Ensure-Installed $py_exe
     Ensure-Config
-    & $py_exe -m ou_harvest --config $CONFIG tui
+    Invoke-OuHarvest $py_exe @("tui")
 }
 
 function Cmd-Run ([string]$py_exe) {
@@ -127,68 +206,62 @@ function Cmd-Run ([string]$py_exe) {
     Write-Bold "Running full pipeline..."
     Write-Host ""
 
-    Write-Bold "[1/6] Discover"
-    & $py_exe -m ou_harvest --config $CONFIG discover
-    Write-Host ""
+    $steps = @(
+        @{ Label = "Discover"; Args = @("discover") },
+        @{ Label = "Crawl"; Args = @("crawl") },
+        @{ Label = "Parse"; Args = @("parse") }
+    )
 
-    Write-HTML "[2/6] Crawl"
-    & $py_exe -m ou_harvest --config $CONFIG crawl
-    Write-Host ""
-
-    Write-Bold "[3/6] Parse"
-    & $py_exe -m ou_harvest --config $CONFIG parse
-    Write-Host ""
-
-    # Determine enrich provider from config
-    $provider = ""
-    $config_content = Get-Content $CONFIG -Raw
-    if ($config_content -match '\[ollama\].*?enabled = true') {
-        $provider = "ollama"
-    } elseif ($config_content -match '\[openai\].*?enabled = true') {
-        $provider = "openai"
+    if (Test-DemographicsEnabled) {
+        $steps += @{ Label = "Demographics"; Args = @("demographics") }
     }
 
-    if ($provider -ne "") {
-        Write-Bold "[4/6] Enrich ($provider)"
-        & $py_exe -m ou_harvest --config $CONFIG enrich --provider $provider
-    } else {
-        Write-Bold "[4/6] Enrich (skipped - no provider enabled)"
+    $provider = Get-EnabledProvider
+    if ($null -ne $provider) {
+        $steps += @{ Label = "Enrich ($provider)"; Args = @("enrich", "--provider", $provider) }
     }
-    Write-Host ""
 
-    Write-Bold "[5/6] Review"
-    & $py_exe -m ou_harvest --config $CONFIG review --json
-    Write-Host ""
+    $steps += @{ Label = "Review"; Args = @("review", "--json") }
+    $steps += @{ Label = "Export"; Args = @("export", "--format", "json") }
+    $steps += @{ Label = "Export JSONL"; Args = @("export", "--format", "jsonl") }
 
-    Write-Bold "[6/6] Export"
-    & $py_exe -m ou_harvest --config $CONFIG export --format json
-    & $py_exe -m ou_harvest --config $CONFIG export --format jsonl
-    Write-Host ""
+    for ($i = 0; $i -lt $steps.Count; $i++) {
+        $step = $steps[$i]
+        Write-Bold ("[{0}/{1}] {2}" -f ($i + 1), $steps.Count, $step.Label)
+        Invoke-OuHarvest $py_exe $step.Args
+        Write-Host ""
+    }
 
     Write-Green "Full pipeline complete. Output in data/exports/"
 }
 
-function Cmd-Stage ([string]$py_exe, [string]$stage) {
+function Cmd-Stage ([string]$py_exe, [string]$stage, [string[]]$StageArgs = @()) {
     $py_exe = Ensure-Installed $py_exe
     Ensure-Config
-    $args_list = $args
-    
+
     switch ($stage) {
-        { $_ -in "discover","crawl","parse","review" } {
-            & $py_exe -m ou_harvest --config $CONFIG $stage $args_list
+        { $_ -in "discover","crawl","parse","demographics" } {
+            $cliArgs = @($stage) + $StageArgs
+            Invoke-OuHarvest $py_exe $cliArgs
+        }
+        "review" {
+            $cliArgs = @($stage) + $StageArgs
+            Invoke-OuHarvest $py_exe $cliArgs
         }
         "enrich" {
-            if ($args_list.Count -eq 0) {
+            if ($StageArgs.Count -eq 0) {
                 Write-Red "Usage: .\setup.ps1 enrich --provider <ollama|openai>"
                 exit 1
             }
-            & $py_exe -m ou_harvest --config $CONFIG enrich $args_list
+            $cliArgs = @("enrich") + $StageArgs
+            Invoke-OuHarvest $py_exe $cliArgs
         }
         "export" {
-            if ($args_list.Count -gt 0 -and $args_list[0] -eq "--format") {
-                & $py_exe -m ou_harvest --config $CONFIG export $args_list
+            if ($StageArgs.Count -gt 0) {
+                $cliArgs = @("export") + $StageArgs
+                Invoke-OuHarvest $py_exe $cliArgs
             } else {
-                & $py_exe -m ou_harvest --config $CONFIG export --format json
+                Invoke-OuHarvest $py_exe @("export", "--format", "json")
             }
         }
         Default {
@@ -200,20 +273,41 @@ function Cmd-Stage ([string]$py_exe, [string]$stage) {
 
 # ---------- main ----------
 $cmd = $args[0]
-if ($null -eq $cmd) { $cmd = "help" }
-
-$py_venv = Ensure-Venv
+if ($null -eq $cmd) { $cmd = "install" }
 
 switch ($cmd) {
-    "install" { Cmd-Install $py_venv }
-    "run"      { Cmd-Run $py_venv }
-    "tui"      { Cmd-Tui $py_venv }
-    "test"     { Cmd-Test $py_venv $args[1..($args.Count-1)] }
-    "doctor"   { Cmd-Doctor $py_venv }
-    { $_ -in "discover","crawl","parse","enrich","review","export" } {
+    "install" {
+        $py_venv = Ensure-Venv
+        Cmd-Install $py_venv
+    }
+    "run" {
+        $py_venv = Ensure-Venv
+        Cmd-Run $py_venv
+    }
+    "tui" {
+        $py_venv = Ensure-Venv
+        Cmd-Tui $py_venv
+    }
+    "test" {
+        $py_venv = Ensure-Venv
+        $remainingArgs = @()
+        if ($args.Count -gt 1) {
+            $remainingArgs = $args[1..($args.Count - 1)]
+        }
+        Cmd-Test $py_venv $remainingArgs
+    }
+    "doctor" {
+        $py_venv = Ensure-Venv
+        Cmd-Doctor $py_venv
+    }
+    { $_ -in "discover","crawl","parse","demographics","enrich","review","export" } {
+        $py_venv = Ensure-Venv
         $stage = $cmd
-        $remaining_args = $args[1..($args.Count-1)]
-        Cmd-Stage $py_venv $stage $remaining_args
+        $remainingArgs = @()
+        if ($args.Count -gt 1) {
+            $remainingArgs = $args[1..($args.Count - 1)]
+        }
+        Cmd-Stage $py_venv $stage $remainingArgs
     }
     "help" {
         Write-Bold "ou-harvest setup & run script (PowerShell)"
@@ -226,9 +320,13 @@ switch ($cmd) {
         Write-Host "  .\setup.ps1 test          Run tests"
         Write-Host "  .\setup.ps1 doctor        Check config and dependencies"
         Write-Host "  .\setup.ps1 help          Show this help"
+        Write-Host ""
+        Write-Host "Stages:"
+        Write-Host "  discover, crawl, parse, demographics, enrich, review, export"
     }
     Default {
         Write-Red "Unknown command: $cmd"
         Write-Host "Run '.\setup.ps1 help' for usage."
+        exit 1
     }
 }
