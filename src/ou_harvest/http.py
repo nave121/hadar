@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import time
+from typing import Any
 from urllib.parse import urlparse
 
 import requests
@@ -47,9 +48,25 @@ class RequestsFetcher(BaseFetcher):
         self.session.headers["User-Agent"] = config.user_agent
 
     def fetch(self, url: str) -> FetchResult:
+        return self.request("GET", url)
+
+    def request(
+        self,
+        method: str,
+        url: str,
+        *,
+        json_payload: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> FetchResult:
         self._check_domain(url)
         self._throttle()
-        response = self.session.get(url, timeout=self.config.request_timeout_seconds)
+        response = self.session.request(
+            method.upper(),
+            url,
+            json=json_payload,
+            headers=headers,
+            timeout=self.config.request_timeout_seconds,
+        )
         response.raise_for_status()
         return FetchResult(
             url=response.url,
@@ -61,6 +78,18 @@ class RequestsFetcher(BaseFetcher):
 
 class PlaywrightFetcher(BaseFetcher):
     def fetch(self, url: str) -> FetchResult:
+        return self.request("GET", url)
+
+    def request(
+        self,
+        method: str,
+        url: str,
+        *,
+        json_payload: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> FetchResult:
+        if method.upper() != "GET":
+            raise NotImplementedError("PlaywrightFetcher only supports GET requests")
         self._check_domain(url)
         self._throttle()
         try:

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+from hashlib import sha256
+import json
 import logging
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Any, Callable, Iterable
 
 from .config import AppConfig
 from .demographics import analyze_photo
@@ -52,7 +55,7 @@ class OuHarvestPipeline:
         self.event_sink = event_sink
         self.should_cancel = should_cancel or (lambda: False)
         self.secret_store = secret_store or SecretStore()
-        self._reverse_checksum_map: dict[str, str] | None = None
+        self._reverse_fingerprint_map: dict[str, str] | None = None
 
     def discover(self) -> DiscoverySnapshot:
         self._check_cancel("discover")
@@ -81,16 +84,17 @@ class OuHarvestPipeline:
         # Merge: static links from HTML + generated from selects + seed URLs
         all_links: dict[str, DiscoveryLink] = {}
         for link in snapshot.result_links:
-            all_links[link.url] = link
+            all_links[self._request_key(link)] = link
         for link in generated_links:
-            all_links.setdefault(link.url, link)
+            all_links.setdefault(self._request_key(link), link)
         for url in self.config.seed_result_urls:
-            all_links.setdefault(url, DiscoveryLink(url=url))
+            link = DiscoveryLink(url=url)
+            all_links.setdefault(self._request_key(link), link)
 
         result_links = list(all_links.values())
         snapshot = snapshot.model_copy(update={"result_links": sorted(result_links, key=lambda item: item.url)})
         self.storage.save_json("state/discovery.json", snapshot.model_dump(mode="json"))
-        self.storage.update_fingerprint(fetched.url, artifact.checksum)
+        self.storage.update_fingerprint(self._request_key(DiscoveryLink(url=fetched.url)), artifact.checksum)
         self.storage.flush_fingerprints()
         self._emit(
             "log",
@@ -108,54 +112,56 @@ class OuHarvestPipeline:
         else:
             snapshot = DiscoverySnapshot.model_validate(snapshot_data)
 
-        urls = {item.url for item in snapshot.result_links}
-        crawled_urls: list[str] = []
+        crawled_requests: list[dict[str, Any]] = []
         seen: set[str] = set()
-        queue = list(urls)
+        queue = list(snapshot.result_links)
         personal_pages_remaining = self.config.personal_page_limit
         while queue:
             self._check_cancel("crawl")
-            url = queue.pop(0)
-            if url in seen:
+            link = queue.pop(0)
+            request_key = self._request_key(link)
+            if request_key in seen:
                 continue
-            seen.add(url)
+            seen.add(request_key)
             self._emit(
                 "progress",
                 stage="crawl",
                 message="Fetching results page",
-                url=url,
+                url=link.url,
                 queue_size=len(queue),
-                crawled_count=len(crawled_urls),
-                current=len(crawled_urls),
-                total=len(crawled_urls) + len(queue) + 1,
+                crawled_count=len(crawled_requests),
+                current=len(crawled_requests),
+                total=len(crawled_requests) + len(queue) + 1,
             )
-            fetched = self.fetcher.fetch(url)
+            fetched = self._fetch_link(link)
             artifact = self.storage.write_artifact(
-                kind="html",
-                source_url=fetched.url,
+                kind=link.artifact_kind,
+                source_url=link.url,
                 content=fetched.content,
                 content_type=fetched.content_type,
             )
-            self.storage.update_fingerprint(fetched.url, artifact.checksum)
-            crawled_urls.append(fetched.url)
+            self.storage.update_fingerprint(request_key, artifact.checksum)
+            if link.method == "GET" and fetched.url != link.url:
+                self.storage.update_fingerprint(fetched.url, artifact.checksum)
+            crawled_requests.append(self._manifest_entry(link))
             self._emit(
                 "artifact_saved",
                 stage="crawl",
-                message="Saved HTML artifact",
-                url=fetched.url,
+                message=f"Saved {link.artifact_kind.upper()} artifact",
+                url=link.url,
                 artifact_path=artifact.path,
-                crawled_count=len(crawled_urls),
+                crawled_count=len(crawled_requests),
             )
-            result_page = self.adapter.parse_results_page(fetched.text, fetched.url)
+            result_page = self.adapter.parse_results_artifact(fetched.content, fetched.content_type, link)
             if self.config.demographics.enabled:
                 for person in result_page.people:
                     if person.photo_url:
                         photo_artifact = self._download_photo(person.photo_url, seen)
                         if photo_artifact is not None:
-                            crawled_urls.append(photo_artifact.source_url)
-            for next_url in result_page.pagination_urls:
-                if next_url not in seen:
-                    queue.append(next_url)
+                            crawled_requests.append(self._manifest_entry(DiscoveryLink(url=photo_artifact.source_url)))
+            for next_link in result_page.pagination_links:
+                if self._request_key(next_link) not in seen:
+                    queue.append(next_link)
 
             personal_links = [
                 link.url
@@ -175,7 +181,7 @@ class OuHarvestPipeline:
                     stage="crawl",
                     message="Fetching linked profile artifact",
                     url=personal_url,
-                    crawled_count=len(crawled_urls),
+                    crawled_count=len(crawled_requests),
                 )
                 personal_fetch = self.fetcher.fetch(personal_url)
                 kind = "pdf" if personal_url.lower().endswith(".pdf") else "html"
@@ -186,14 +192,14 @@ class OuHarvestPipeline:
                     content_type=personal_fetch.content_type,
                 )
                 self.storage.update_fingerprint(personal_fetch.url, personal_artifact.checksum)
-                crawled_urls.append(personal_fetch.url)
+                crawled_requests.append(self._manifest_entry(DiscoveryLink(url=personal_fetch.url)))
                 self._emit(
                     "artifact_saved",
                     stage="crawl",
                     message="Saved linked artifact",
                     url=personal_fetch.url,
                     artifact_path=personal_artifact.path,
-                    crawled_count=len(crawled_urls),
+                    crawled_count=len(crawled_requests),
                 )
                 if personal_pages_remaining > 0:
                     personal_pages_remaining -= 1
@@ -206,7 +212,7 @@ class OuHarvestPipeline:
                         if photo_url:
                             photo_artifact = self._download_photo(photo_url, seen)
                             if photo_artifact is not None:
-                                crawled_urls.append(photo_artifact.source_url)
+                                crawled_requests.append(self._manifest_entry(DiscoveryLink(url=photo_artifact.source_url)))
                     cv_links = [link.url for link in page_data.links if link.kind == "cv"]
                     for cv_url in cv_links:
                         self._check_cancel("crawl")
@@ -214,57 +220,65 @@ class OuHarvestPipeline:
                             continue
                         seen.add(cv_url)
                         try:
-                            self._emit("progress", stage="crawl", message="Fetching CV/PDF", url=cv_url, crawled_count=len(crawled_urls))
+                            self._emit("progress", stage="crawl", message="Fetching CV/PDF", url=cv_url, crawled_count=len(crawled_requests))
                             cv_fetch = self.fetcher.fetch(cv_url)
                             cv_kind = "pdf" if cv_url.lower().endswith(".pdf") else "html"
                             cv_artifact = self.storage.write_artifact(
                                 kind=cv_kind, source_url=cv_fetch.url, content=cv_fetch.content, content_type=cv_fetch.content_type,
                             )
                             self.storage.update_fingerprint(cv_fetch.url, cv_artifact.checksum)
-                            crawled_urls.append(cv_fetch.url)
-                            self._emit("artifact_saved", stage="crawl", message="Saved CV artifact", url=cv_fetch.url, artifact_path=cv_artifact.path, crawled_count=len(crawled_urls))
+                            crawled_requests.append(self._manifest_entry(DiscoveryLink(url=cv_fetch.url)))
+                            self._emit("artifact_saved", stage="crawl", message="Saved CV artifact", url=cv_fetch.url, artifact_path=cv_artifact.path, crawled_count=len(crawled_requests))
                         except Exception as exc:
                             self._emit("log", stage="crawl", message=f"Failed to fetch CV: {exc}", url=cv_url)
-        self._reverse_checksum_map = None
+        self._reverse_fingerprint_map = None
         self.storage.flush_fingerprints()
-        self.storage.save_json("state/crawl_manifest.json", {"urls": crawled_urls})
-        self._emit("log", stage="crawl", message="Crawl completed", crawled_count=len(crawled_urls))
-        return crawled_urls
+        self.storage.save_json("state/crawl_manifest.json", {"requests": crawled_requests})
+        self._emit("log", stage="crawl", message="Crawl completed", crawled_count=len(crawled_requests))
+        return [item["url"] for item in crawled_requests]
 
     def parse(self) -> list[PersonRecord]:
         records: dict[str, PersonRecord] = {}
 
         # Only parse artifacts from the current crawl manifest
-        manifest = self.storage.load_json("state/crawl_manifest.json", default={"urls": []})
-        crawled_urls = set(manifest.get("urls", []))
-
+        manifest_entries = self._load_crawl_manifest_entries()
+        manifest_by_key = {self._request_key(entry): entry for entry in manifest_entries}
+        crawled_request_keys = set(manifest_by_key)
         html_files = sorted(self.storage.raw_html.glob("*.html"))
+        json_files = sorted(self.storage.raw_json.glob("*.json"))
         pdf_files = sorted(self.storage.raw_pdf.glob("*.pdf"))
-        total_files = len(html_files) + len(pdf_files)
+        total_files = len(html_files) + len(json_files) + len(pdf_files)
         pending_personal_pages: list[tuple[str, str]] = []
 
-        for file_index, path in enumerate(html_files):
+        result_artifacts = [("html", path) for path in html_files] + [("json", path) for path in json_files]
+        for file_index, (artifact_kind, path) in enumerate(result_artifacts):
             self._check_cancel("parse")
-            html = path.read_text(encoding="utf-8", errors="replace")
-            source_url = self._source_url_for_checksum(path.stem)
-            if not source_url:
+            request_key = self._request_key_for_checksum(path.stem)
+            if not request_key:
                 continue
-            if crawled_urls and source_url not in crawled_urls:
+            if crawled_request_keys and request_key not in crawled_request_keys:
                 continue
+            source = manifest_by_key.get(request_key) or DiscoveryLink(url=self.config.start_url)
+            content = path.read_bytes()
+            source_url = source.url
             self._emit(
                 "progress",
                 stage="parse",
-                message="Parsing HTML artifact",
+                message=f"Parsing {artifact_kind.upper()} artifact",
                 source_url=source_url,
                 artifact_path=str(path),
                 current=file_index,
                 total=total_files,
             )
-            result_page = self.adapter.parse_results_page(html, source_url)
-            if result_page.people or result_page.pagination_urls:
+            result_page = self.adapter.parse_results_artifact(content, _content_type_for_suffix(path.suffix), source)
+            if result_page.people or result_page.pagination_links:
                 for person in result_page.people:
-                    records[person.person_id] = self._merge_record(records.get(person.person_id), person)
-            else:
+                    if not person.source_connectors:
+                        person.source_connectors = [self.config.university]
+                    existing = records.get(person.person_id) or self.storage.load_record(person.person_id)
+                    records[person.person_id] = self._merge_record(existing, person)
+            elif artifact_kind == "html":
+                html = content.decode("utf-8", errors="replace")
                 pending_personal_pages.append((source_url, html))
 
         pending = list(pending_personal_pages)
@@ -300,18 +314,20 @@ class OuHarvestPipeline:
 
         for pdf_index, path in enumerate(pdf_files):
             self._check_cancel("parse")
-            source_url = self._source_url_for_checksum(path.stem)
-            if not source_url:
+            request_key = self._request_key_for_checksum(path.stem)
+            if not request_key:
                 continue
-            if crawled_urls and source_url not in crawled_urls:
+            if crawled_request_keys and request_key not in crawled_request_keys:
                 continue
+            source = manifest_by_key.get(request_key) or DiscoveryLink(url=request_key)
+            source_url = source.url
             self._emit(
                 "progress",
                 stage="parse",
                 message="Extracting PDF text",
                 source_url=source_url,
                 artifact_path=str(path),
-                current=len(html_files) + pdf_index,
+                current=len(result_artifacts) + pdf_index,
                 total=total_files,
             )
             person = self._match_pdf_link(records, source_url)
@@ -548,13 +564,14 @@ class OuHarvestPipeline:
         return updated_records
 
     def export(self, fmt: str) -> Path:
-        records = self._scoped_records()
+        records = self.storage.all_records()
+        filename = self._export_filename(fmt)
         if fmt == "json":
-            path = self.storage.export_records_json(records)
+            path = self.storage.export_records_json(records, filename=filename)
             self._emit("log", stage="export", message=f"Exported {len(records)} records to JSON", path=str(path), format=fmt)
             return path
         if fmt == "jsonl":
-            path = self.storage.export_records_jsonl(records)
+            path = self.storage.export_records_jsonl(records, filename=filename)
             self._emit("log", stage="export", message=f"Exported {len(records)} records to JSONL", path=str(path), format=fmt)
             return path
         raise ValueError(f"Unsupported export format: {fmt}")
@@ -574,20 +591,80 @@ class OuHarvestPipeline:
         self._emit("log", stage="review", message="Review queue updated", review_queue_count=len(output))
         return output
 
-    def _source_url_for_checksum(self, checksum_prefix: str) -> str | None:
-        if self._reverse_checksum_map is None:
+    def _request_key(self, link: DiscoveryLink) -> str:
+        method = (link.method or "GET").upper()
+        headers = {key: value for key, value in sorted((link.headers or {}).items())}
+        if method == "GET" and not link.json_payload and not headers and link.artifact_kind == "html":
+            return link.url
+
+        canonical_payload = json.dumps(
+            {
+                "method": method,
+                "url": link.url,
+                "json_payload": link.json_payload,
+                "headers": headers,
+                "artifact_kind": link.artifact_kind,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        digest = sha256(canonical_payload.encode("utf-8")).hexdigest()[:16]
+        return f"request:{digest}"
+
+    def _manifest_entry(self, link: DiscoveryLink) -> dict[str, Any]:
+        payload = link.model_dump(mode="json")
+        payload["request_id"] = self._request_key(link)
+        return payload
+
+    def _load_crawl_manifest_entries(self) -> list[DiscoveryLink]:
+        manifest = self.storage.load_json("state/crawl_manifest.json", default={"urls": []})
+        if isinstance(manifest, dict):
+            raw_entries = manifest.get("requests")
+            if raw_entries is None:
+                raw_entries = [{"url": url} for url in manifest.get("urls", [])]
+        elif isinstance(manifest, list):
+            raw_entries = manifest
+        else:
+            raw_entries = []
+
+        entries: list[DiscoveryLink] = []
+        for item in raw_entries:
+            if isinstance(item, str):
+                item = {"url": item}
+            if not isinstance(item, dict):
+                continue
+            normalized = {key: value for key, value in item.items() if key != "request_id"}
+            entries.append(DiscoveryLink.model_validate(normalized))
+        return entries
+
+    def _request_key_for_checksum(self, checksum_prefix: str) -> str | None:
+        if self._reverse_fingerprint_map is None:
             fingerprints = self.storage.load_json("state/fingerprints.json", default={})
             by_checksum: dict[str, str] = {}
-            for url, checksum in fingerprints.items():
+            for request_key, checksum in fingerprints.items():
                 prefix = checksum[:16]
                 if prefix in by_checksum:
                     logger.warning(
                         "Fingerprint prefix collision: %s -> %s and %s",
-                        prefix, by_checksum[prefix], url,
+                        prefix, by_checksum[prefix], request_key,
                     )
-                by_checksum[prefix] = url
-            self._reverse_checksum_map = by_checksum
-        return self._reverse_checksum_map.get(checksum_prefix)
+                by_checksum[prefix] = request_key
+            self._reverse_fingerprint_map = by_checksum
+        return self._reverse_fingerprint_map.get(checksum_prefix)
+
+    def _fetch_link(self, link: DiscoveryLink) -> FetchResult:
+        if link.method == "GET":
+            return self.fetcher.fetch(link.url)
+        request = getattr(self.fetcher, "request", None)
+        if callable(request):
+            return request(
+                link.method,
+                link.url,
+                json_payload=link.json_payload,
+                headers=link.headers or None,
+            )
+        raise NotImplementedError("Current fetcher does not support non-GET result links")
 
     def _download_photo(self, photo_url: str, seen: set[str]) -> Artifact | None:
         if photo_url in seen:
@@ -672,6 +749,16 @@ class OuHarvestPipeline:
         if current is None:
             return incoming
         return current.merge(incoming)
+
+    def _export_filename(self, fmt: str) -> str:
+        stamp = datetime.now(timezone.utc).strftime("%y%m%d_%H%M%S")
+        base_name = f"people_{stamp}"
+        filename = f"{base_name}.{fmt}"
+        counter = 2
+        while (self.storage.exports / filename).exists():
+            filename = f"{base_name}_{counter:02d}.{fmt}"
+            counter += 1
+        return filename
 
     def _match_personal_page(
         self, records: dict[str, PersonRecord], source_url: str, page_name: str | None

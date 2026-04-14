@@ -46,7 +46,9 @@ The code intentionally does not model or infer sensitive personal traits.
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e .[tui,playwright,pdf]
+pip install -e .[tui,pdf]
+# Optional: install Playwright only for connectors or manual checks that need browser rendering
+pip install -e .[playwright]
 playwright install chromium
 cp ou_harvest.toml.example ou_harvest.toml
 ou_harvest doctor --config ou_harvest.toml
@@ -90,12 +92,12 @@ Keybindings: `q` quit, `r` refresh data, `c` cancel run.
 
 | Stage | What it does |
 |-------|-------------|
-| **discover** | Fetches the staff directory landing page, extracts result page links and department links, merges with `seed_result_urls` from config |
-| **crawl** | Follows result page links with pagination. Fetches linked personal pages, CVs (PDF), and CRIS pages. All content stored as content-addressed artifacts in `data/raw/` |
-| **parse** | Reads stored HTML artifacts, routes through the appropriate parser (results page vs personal page), merges records by `person_id`. PDFs are text-extracted and attached as artifacts |
+| **discover** | Fetches the staff directory landing page, extracts result page links and department links, and stores connector metadata used to build request-aware result links |
+| **crawl** | Follows result page links with pagination. Result links may be HTML GETs or JSON POST requests. Linked personal pages, CVs (PDF), and CRIS pages are also fetched. All content is stored as content-addressed artifacts in `data/raw/` |
+| **parse** | Reads stored HTML and JSON result artifacts, routes through the appropriate parser (results page vs personal page), and merges records by `person_id`. PDFs are text-extracted and attached as artifacts |
 | **enrich** | Sends profile text and CV text (chunked at ~10k chars) to an LLM extractor. Extracts education, appointments, publications, awards, academic service, and notable links. Low-confidence results get review flags |
 | **review** | Collects records below the confidence threshold or with review flags into `data/review/queue.json` |
-| **export** | Writes `data/exports/people.json` or `people.jsonl` |
+| **export** | Writes a timestamped snapshot like `data/exports/people_YYMMDD_HHMMSS.json` or `.jsonl` |
 
 Stages are idempotent. Running `crawl` without a prior `discover` will trigger discovery automatically. The `enrich` stage can be re-run with a different provider.
 
@@ -145,16 +147,19 @@ All settings live in `ou_harvest.toml` (TOML format). See `ou_harvest.toml.examp
 data/
   raw/
     html/          # Downloaded HTML pages (content-addressed by SHA256 prefix)
+    json/          # Downloaded JSON result pages
     pdf/           # Downloaded PDF files (CVs)
     text/          # Extracted text from PDFs
   records/         # Canonical PersonRecord JSON documents (one per person)
   review/          # Review flags and queue.json
-  exports/         # people.json and people.jsonl snapshots
+  exports/         # timestamped snapshots like people_260414_123456.json
   state/
     discovery.json       # Last discovery snapshot
-    fingerprints.json    # URL -> SHA256 checksum map for incremental reruns
-    crawl_manifest.json  # List of all crawled URLs
+    fingerprints.json    # Request key -> SHA256 checksum map for incremental reruns
+    crawl_manifest.json  # Request-aware crawl manifest for the current run
 ```
+
+`data/`, local `ou_harvest.toml`, and other scratch outputs are intended to stay local and are gitignored. Do not commit generated pipeline outputs such as `data/exports/`, `data/records/`, or `data/raw/` to a public repository.
 
 ## LLM enrichment
 
@@ -179,7 +184,7 @@ The OpenAI API key is resolved in this order:
    - Linux: `~/.config/ou-harvest/secrets.json`
    - Windows: `%APPDATA%/ou-harvest/secrets.json`
 
-The shared `ou_harvest.toml` never contains the actual token.
+The shared `ou_harvest.toml` never contains the actual token, and the local runtime `ou_harvest.toml` is kept out of git.
 
 ## Optional dependencies
 
@@ -188,7 +193,7 @@ Install extras as needed:
 | Extra | Packages | Purpose |
 |-------|----------|---------|
 | `tui` | textual>=0.52 | Full-screen terminal UI |
-| `playwright` | playwright>=1.44 | Browser-rendered page fetching (for JS-heavy pages) |
+| `playwright` | playwright>=1.44 | Browser-rendered page fetching when a connector or manual check needs it |
 | `pdf` | pdfplumber>=0.11, pypdf>=4.2 | PDF text extraction from CV files |
 
 Activate Playwright mode by creating a `.use_playwright` sentinel file in the project root.
@@ -211,4 +216,10 @@ pytest tests/test_parsers.py    # single file
 pytest tests/test_parsers.py::test_parse_discovery_page_collects_result_and_department_staff_links  # single test
 ```
 
-Tests use HTML fixtures in `tests/fixtures/` captured from real OU pages. The `pythonpath` is configured to `src` in `pyproject.toml`. Some tests use `unittest.mock` and `monkeypatch` for stubbing HTTP responses and pipeline factories.
+Tests use a mix of small checked-in synthetic fixtures and larger real-site fixtures generated on demand. To fetch the real-site fixtures locally, run:
+
+```bash
+python3 scripts/fetch_test_fixtures.py
+```
+
+That script writes local-only fixtures such as `bgu_page_data.json`, `bgu_search_page_1.json`, selected BGU profile pages, and the Technion fixtures. If those generated fixtures are absent, the dependent tests skip cleanly. The `pythonpath` is configured to `src` in `pyproject.toml`. Some tests use `unittest.mock` and `monkeypatch` for stubbing HTTP responses and pipeline factories.

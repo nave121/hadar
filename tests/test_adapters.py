@@ -1,12 +1,44 @@
+import json
 from pathlib import Path
 
 import pytest
 
 from ou_harvest.adapters import available_adapters, get_adapter
+from ou_harvest.adapters.bgu import BGU_SEARCH_URL
 from ou_harvest.adapters.base import UniversityAdapter
-from ou_harvest.models import DiscoveryFilterGroup, DiscoveryOption, DiscoverySnapshot
+from ou_harvest.models import DiscoveryFilterGroup, DiscoveryLink, DiscoveryOption, DiscoverySnapshot
+from tests.fixture_helpers import require_fixture
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def _parse_bgu_search_fixture():
+    adapter = get_adapter("bgu")
+    payload = json.loads(require_fixture("bgu_search_page_1.json").read_text(encoding="utf-8"))
+    page_size = len(payload["staffMembers"])
+    result = adapter.parse_results_artifact(
+        require_fixture("bgu_search_page_1.json").read_bytes(),
+        "application/json",
+        DiscoveryLink(
+            url=BGU_SEARCH_URL,
+            method="POST",
+            artifact_kind="json",
+            headers={"Content-Type": "application/json"},
+            json_payload={
+                "pageNodeId": "107837",
+                "cultureCode": "he-IL",
+                "currentPage": 1,
+                "pageSize": page_size,
+                "term": "",
+                "units": [],
+                "selectedTypes": [],
+                "selectedCampuses": [],
+                "currentStaff": False,
+                "lookingForStudents": False,
+            },
+        ),
+    )
+    return result
 
 
 def test_available_adapters_returns_all_three():
@@ -26,10 +58,10 @@ def test_get_adapter_returns_correct_type():
     assert not adapter.requires_playwright()
 
 
-def test_bgu_adapter_requires_playwright():
+def test_bgu_adapter_does_not_require_playwright():
     adapter = get_adapter("bgu")
     assert adapter.name == "bgu"
-    assert adapter.requires_playwright()
+    assert not adapter.requires_playwright()
     assert "bgu.ac.il" in adapter.default_allowed_domains
 
 
@@ -48,11 +80,30 @@ def test_each_adapter_has_default_start_url():
 
 
 def test_bgu_parse_results_page_extracts_staff_cards():
-    fixture = FIXTURES / "bgu_results.html"
-    if not fixture.exists():
-        return  # skip if fixture not available
     adapter = get_adapter("bgu")
-    html = fixture.read_text(encoding="utf-8")
+    html = """
+    <html>
+      <body>
+        <a class="staff-member-item" href="/people/test-person/">
+          <div class="member-content">
+            <div class="top-section">
+              <h2 class="member-name">ד"ר טסט</h2>
+            </div>
+            <div class="department">
+              <span>מרצה בכיר</span>
+              <div class="department-separator"></div>
+              <span>חבר/ת סגל אקדמי בכיר</span>
+              <div class="department-separator"></div>
+              <span>הפקולטה למדעי הרוח והחברה, כלכלה</span>
+            </div>
+            <div class="bottom-section">
+              <a href="mailto:test@bgu.ac.il">test@bgu.ac.il</a>
+            </div>
+          </div>
+        </a>
+      </body>
+    </html>
+    """
     result = adapter.parse_results_page(html, "https://www.bgu.ac.il/people/")
 
     assert len(result.people) > 0
@@ -63,28 +114,22 @@ def test_bgu_parse_results_page_extracts_staff_cards():
     assert person.org_affiliations[0].organization == "Ben-Gurion University of the Negev"
 
 
-def test_bgu_parse_live_results_page_extracts_expected_cards():
-    fixture = FIXTURES / "bgu_listing_live.html"
-    adapter = get_adapter("bgu")
-    html = fixture.read_text(encoding="utf-8")
-    result = adapter.parse_results_page(html, "https://www.bgu.ac.il/people/")
+def test_bgu_parse_api_results_extracts_expected_records():
+    result = _parse_bgu_search_fixture()
 
     assert len(result.people) == 30
-    assert result.people[0].full_name == "ד\"ר אנג'ליקה אבדלימוב"
-    assert result.people[0].contacts[0].value == "nonbgu@bgu.ac.il"
-    assert result.people[0].links[0].kind == "personal_page"
-    assert result.people[0].links[0].url == "https://www.bgu.ac.il/people/nonbgu/"
+    person = next(record for record in result.people if record.full_name == "ד\"ר אנג'ליקה אבדלימוב")
+    assert person.contacts[0].value == "nonbgu@bgu.ac.il"
+    assert person.links[0].kind == "personal_page"
+    assert person.links[0].url == "https://www.bgu.ac.il/people/nonbgu/"
 
 
-def test_bgu_parse_live_results_page_keeps_orcid_links_from_listing_cards():
-    fixture = FIXTURES / "bgu_listing_live.html"
-    adapter = get_adapter("bgu")
-    html = fixture.read_text(encoding="utf-8")
-    result = adapter.parse_results_page(html, "https://www.bgu.ac.il/people/")
+def test_bgu_parse_api_results_keeps_orcid_links():
+    result = _parse_bgu_search_fixture()
 
-    person = next(record for record in result.people if record.full_name == "חליל אבו יונס")
+    person = next(record for record in result.people if record.full_name == "מוחמד אבו אחמד")
     assert any(
-        link.kind == "orcid" and link.url == "https://orcid.org/0009-0006-4362-267X"
+        link.kind == "orcid" and link.url == "https://orcid.org/0009-0001-6613-2044"
         for link in person.links
     )
 
@@ -125,21 +170,15 @@ def test_bgu_listing_extracts_photo_url_for_staff_with_real_photo():
     )
 
 
-def test_bgu_listing_filters_placeholder_photo():
-    fixture = FIXTURES / "bgu_listing_live.html"
-    adapter = get_adapter("bgu")
-    html = fixture.read_text(encoding="utf-8")
-    result = adapter.parse_results_page(html, "https://www.bgu.ac.il/people/")
+def test_bgu_api_results_filter_placeholder_photo():
+    result = _parse_bgu_search_fixture()
 
-    person = next(record for record in result.people if record.full_name == "חליל אבו יונס")
+    person = next(record for record in result.people if record.full_name == "ד\"ר סלים אבו ג'אבר")
     assert person.photo_url is None
 
 
-def test_bgu_parse_live_results_page_preserves_rank_staff_type_and_department():
-    fixture = FIXTURES / "bgu_listing_live.html"
-    adapter = get_adapter("bgu")
-    html = fixture.read_text(encoding="utf-8")
-    result = adapter.parse_results_page(html, "https://www.bgu.ac.il/people/")
+def test_bgu_parse_api_results_preserves_rank_staff_type_and_department():
+    result = _parse_bgu_search_fixture()
 
     person = next(record for record in result.people if record.full_name == 'ד"ר סלימאן אבו בדר')
     assert person.current_rank == "מרצה בכיר"
@@ -148,14 +187,26 @@ def test_bgu_parse_live_results_page_preserves_rank_staff_type_and_department():
     assert person.org_affiliations[0].faculty_or_unit == "הפקולטה למדעי הרוח והחברה, כלכלה"
 
 
-def test_bgu_generate_result_links_creates_pagination():
-    from ou_harvest.models import DiscoverySnapshot
+def test_bgu_parse_api_results_skips_placeholder_email_contacts():
+    result = _parse_bgu_search_fixture()
+
+    person = next(record for record in result.people if record.full_name == "גירום אבאי")
+    assert person.contacts == []
+
+
+def test_bgu_generate_result_links_creates_first_api_request():
     adapter = get_adapter("bgu")
-    snapshot = DiscoverySnapshot(connector_name="bgu", start_url="https://www.bgu.ac.il/people/")
+    snapshot = DiscoverySnapshot(
+        connector_name="bgu",
+        start_url="https://www.bgu.ac.il/people/",
+        connector_state={"page_node_id": "107837", "culture_code": "he-IL", "page_size": 30},
+    )
     links = adapter.generate_result_links(snapshot, {})
-    assert len(links) > 100  # should generate many pages
-    assert links[0].url == "https://www.bgu.ac.il/people/"
-    assert "?page=2" in links[1].url
+    assert len(links) == 1
+    assert links[0].url == BGU_SEARCH_URL
+    assert links[0].method == "POST"
+    assert links[0].artifact_kind == "json"
+    assert links[0].json_payload["currentPage"] == 1
 
 
 def test_bgu_parse_discovery_page_builds_filter_groups_from_page_data(monkeypatch):
@@ -164,17 +215,21 @@ def test_bgu_parse_discovery_page_builds_filter_groups_from_page_data(monkeypatc
     monkeypatch.setattr(
         adapter,
         "_load_page_data",
-        lambda: {
+        lambda *args, **kwargs: {
             "departments": [{"key": 117531, "value": "המכונים לחקר המדבר"}],
             "typesFiltersItems": [
                 {"key": 1, "value": "סגל אקדמי בכיר"},
                 {"key": 18, "value": "סגל קליני"},
             ],
             "campuses": [{"key": 5, "value": "קמפוס מרקוס"}],
+            "pageSize": 30,
         },
     )
 
-    snapshot = adapter.parse_discovery_page("<html></html>", "https://www.bgu.ac.il/people/")
+    snapshot = adapter.parse_discovery_page(
+        '<div id="staffMembersModernLobbyApp" page-node-id="107837" culture-code="he-IL"></div>',
+        "https://www.bgu.ac.il/people/",
+    )
     groups = {group.key: group for group in snapshot.available_filters}
 
     assert snapshot.connector_name == "bgu"
@@ -182,27 +237,34 @@ def test_bgu_parse_discovery_page_builds_filter_groups_from_page_data(monkeypatc
     assert groups["unit"].options[0].code == "117531"
     assert groups["staff_type"].options[1].code == "18"
     assert groups["campus"].options[0].code == "5"
+    assert snapshot.connector_state == {
+        "page_node_id": "107837",
+        "culture_code": "he-IL",
+        "page_size": 30,
+    }
 
 
 def test_bgu_generate_result_links_uses_generic_filter_map():
-    from ou_harvest.models import DiscoverySnapshot
-
     adapter = get_adapter("bgu")
-    snapshot = DiscoverySnapshot(connector_name="bgu", start_url="https://www.bgu.ac.il/people/")
+    snapshot = DiscoverySnapshot(
+        connector_name="bgu",
+        start_url="https://www.bgu.ac.il/people/",
+        connector_state={"page_node_id": "107837", "culture_code": "he-IL", "page_size": 30},
+    )
 
     links = adapter.generate_result_links(
         snapshot,
         {"unit": ["117531"], "staff_type": ["18"], "campus": ["5"]},
     )
 
-    assert links[0].url == "https://www.bgu.ac.il/people/?unit=117531&types=18&campuses=5"
-    assert links[1].url == "https://www.bgu.ac.il/people/?unit=117531&types=18&campuses=5&page=2"
+    assert links[0].url == BGU_SEARCH_URL
+    assert links[0].json_payload["units"] == [117531]
+    assert links[0].json_payload["selectedTypes"] == [18]
+    assert links[0].json_payload["selectedCampuses"] == [5]
 
 
 def test_technion_parse_discovery_from_sitemap():
-    fixture = FIXTURES / "technion_sitemap.xml"
-    if not fixture.exists():
-        return  # skip if fixture not available
+    fixture = require_fixture("technion_sitemap.xml")
     adapter = get_adapter("technion_med")
     xml = fixture.read_text(encoding="utf-8")
     snapshot = adapter.parse_discovery_page(xml, "https://md.technion.ac.il/page-sitemap.xml")
@@ -216,9 +278,7 @@ def test_technion_parse_discovery_from_sitemap():
 
 
 def test_technion_parse_profile_page():
-    fixture = FIXTURES / "technion_profile.html"
-    if not fixture.exists():
-        return  # skip if fixture not available
+    fixture = require_fixture("technion_profile.html")
     adapter = get_adapter("technion_med")
     html = fixture.read_text(encoding="utf-8")
     result = adapter.parse_results_page(html, "https://md.technion.ac.il/aaron-ciechanover/")
@@ -365,7 +425,7 @@ def test_bgu_parse_profile_page_scopes_contacts_and_filters_site_chrome(
     expected_name: str,
     expected_email: str,
 ):
-    fixture = FIXTURES / fixture_name
+    fixture = require_fixture(fixture_name)
     adapter = get_adapter("bgu")
     html = fixture.read_text(encoding="utf-8")
     result = adapter.parse_personal_page(html, page_url)
@@ -377,7 +437,7 @@ def test_bgu_parse_profile_page_scopes_contacts_and_filters_site_chrome(
 
 
 def test_bgu_parse_profile_page_keeps_orcid_without_turning_it_into_phone():
-    fixture = FIXTURES / "bgu_profile_nonbgu.html"
+    fixture = require_fixture("bgu_profile_nonbgu.html")
     adapter = get_adapter("bgu")
     html = fixture.read_text(encoding="utf-8")
     result = adapter.parse_personal_page(html, "https://www.bgu.ac.il/people/nonbgu/")
@@ -390,7 +450,7 @@ def test_bgu_parse_profile_page_keeps_orcid_without_turning_it_into_phone():
 
 
 def test_bgu_parse_profile_page_emits_profile_text_evidence_without_update_link_chrome():
-    fixture = FIXTURES / "bgu_profile_nonbgu.html"
+    fixture = require_fixture("bgu_profile_nonbgu.html")
     adapter = get_adapter("bgu")
     html = fixture.read_text(encoding="utf-8")
     result = adapter.parse_personal_page(html, "https://www.bgu.ac.il/people/nonbgu/")

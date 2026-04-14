@@ -93,6 +93,7 @@ async def test_tui_summary_shows_image_count_and_demographics_config(tmp_path: P
             lambda self: {
                 "records_count": 5,
                 "raw_html_count": 7,
+                "raw_json_count": 2,
                 "raw_pdf_count": 2,
                 "raw_image_count": 3,
                 "review_queue_count": 1,
@@ -115,13 +116,14 @@ async def test_tui_summary_shows_image_count_and_demographics_config(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_tui_records_table_renders_demographics_and_photo_status(tmp_path: Path, monkeypatch):
+async def test_tui_records_table_renders_source_summary_and_photo_status(tmp_path: Path, monkeypatch):
     config_path = _save_config(tmp_path)
     storage = Storage(tmp_path / "data")
     storage.save_record(
         PersonRecord(
             person_id="abc123",
             full_name="Dr. Test Person",
+            source_connectors=["bgu", "openu"],
             photo_url="https://example.com/photo.jpg",
             photo_artifact_id="photo123",
             demographics=DemographicEstimate(
@@ -140,7 +142,6 @@ async def test_tui_records_table_renders_demographics_and_photo_status(tmp_path:
         app._refresh_records_table()
 
     assert rows
-    assert rows[0][1] == "Woman"
-    assert rows[0][2] == "white"
-    assert rows[0][3] == "41"
-    assert rows[0][4] == "yes"
+    assert rows[0][0] == "bgu, openu"
+    assert rows[0][1] == "Dr. Test Person"
+    assert rows[0][6] == "yes"

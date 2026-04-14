@@ -1,14 +1,18 @@
 """Cross-connector E2E tests verifying all adapters satisfy the same contract."""
 
+import json
 from pathlib import Path
 
 import pytest
 
 from ou_harvest.adapters import available_adapters, get_adapter
+from ou_harvest.adapters.bgu import BGU_SEARCH_URL
 from ou_harvest.adapters.base import UniversityAdapter
 from ou_harvest.config import AppConfig
+from ou_harvest.models import DiscoveryLink
 from ou_harvest.pipeline import OuHarvestPipeline
 from ou_harvest.storage import Storage
+from tests.fixture_helpers import require_fixture
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -35,15 +39,39 @@ def test_adapter_contract_compliance(connector):
 
 @pytest.mark.parametrize("connector,fixture,expected_min", [
     ("openu", "results_page.html", 1),
-    ("bgu", "bgu_listing_live.html", 30),
+    ("bgu", "bgu_search_page_1.json", 30),
 ])
 def test_results_page_produces_records(connector, fixture, expected_min):
     """Each connector's results page produces the expected minimum record count."""
     adapter = get_adapter(connector)
-    html = (FIXTURES / fixture).read_text(encoding="utf-8")
-    url = adapter.default_start_url
-
-    result = adapter.parse_results_page(html, url)
+    if connector == "bgu":
+        payload = json.loads(require_fixture(fixture).read_text(encoding="utf-8"))
+        result = adapter.parse_results_artifact(
+            require_fixture(fixture).read_bytes(),
+            "application/json",
+            DiscoveryLink(
+                url=BGU_SEARCH_URL,
+                method="POST",
+                artifact_kind="json",
+                headers={"Content-Type": "application/json"},
+                json_payload={
+                    "pageNodeId": "107837",
+                    "cultureCode": "he-IL",
+                    "currentPage": 1,
+                    "pageSize": len(payload["staffMembers"]),
+                    "term": "",
+                    "units": [],
+                    "selectedTypes": [],
+                    "selectedCampuses": [],
+                    "currentStaff": False,
+                    "lookingForStudents": False,
+                },
+            ),
+        )
+    else:
+        html = require_fixture(fixture).read_text(encoding="utf-8")
+        url = adapter.default_start_url
+        result = adapter.parse_results_page(html, url)
 
     assert len(result.people) >= expected_min
     for person in result.people:
@@ -61,7 +89,7 @@ def test_results_page_produces_records(connector, fixture, expected_min):
 def test_photo_extraction_across_connectors(connector, fixture, has_photo):
     """extract_photo_url returns a URL when a real photo exists, None otherwise."""
     adapter = get_adapter(connector)
-    html = (FIXTURES / fixture).read_text(encoding="utf-8")
+    html = require_fixture(fixture).read_text(encoding="utf-8")
     url = adapter.default_start_url
 
     result = adapter.extract_photo_url(html, url)
@@ -82,21 +110,51 @@ def test_classify_link_orcid_across_connectors(connector):
 
 @pytest.mark.parametrize("connector,fixture,listing_url", [
     ("openu", "results_page.html", "https://www.openu.ac.il/staff/pages/results.aspx?unit=311"),
-    ("bgu", "bgu_listing_live.html", "https://www.bgu.ac.il/people/"),
+    ("bgu", "bgu_search_page_1.json", BGU_SEARCH_URL),
 ])
 def test_pipeline_parse_produces_records_with_required_fields(connector, fixture, listing_url, tmp_path):
-    """Parse stage produces records with person_id, full_name, and at least one contact."""
+    """Parse stage produces records with person_id, full_name, and navigable identity fields."""
     config = AppConfig(university=connector, output_root=str(tmp_path))
     storage = Storage(tmp_path)
-    html = (FIXTURES / fixture).read_text(encoding="utf-8")
-
-    artifact = storage.write_artifact(
-        kind="html", source_url=listing_url,
-        content=html.encode("utf-8"), content_type="text/html",
-    )
-    storage.update_fingerprint(listing_url, artifact.checksum)
-    storage.flush_fingerprints()
-    storage.save_json("state/crawl_manifest.json", {"urls": [listing_url]})
+    if connector == "bgu":
+        pipeline = OuHarvestPipeline(config)
+        payload = json.loads(require_fixture(fixture).read_text(encoding="utf-8"))
+        request = DiscoveryLink(
+            url=listing_url,
+            method="POST",
+            artifact_kind="json",
+            headers={"Content-Type": "application/json"},
+            json_payload={
+                "pageNodeId": "107837",
+                "cultureCode": "he-IL",
+                "currentPage": 1,
+                "pageSize": len(payload["staffMembers"]),
+                "term": "",
+                "units": [],
+                "selectedTypes": [],
+                "selectedCampuses": [],
+                "currentStaff": False,
+                "lookingForStudents": False,
+            },
+        )
+        artifact = storage.write_artifact(
+            kind="json",
+            source_url=listing_url,
+            content=require_fixture(fixture).read_bytes(),
+            content_type="application/json",
+        )
+        storage.update_fingerprint(pipeline._request_key(request), artifact.checksum)
+        storage.flush_fingerprints()
+        storage.save_json("state/crawl_manifest.json", {"requests": [pipeline._manifest_entry(request)]})
+    else:
+        html = require_fixture(fixture).read_text(encoding="utf-8")
+        artifact = storage.write_artifact(
+            kind="html", source_url=listing_url,
+            content=html.encode("utf-8"), content_type="text/html",
+        )
+        storage.update_fingerprint(listing_url, artifact.checksum)
+        storage.flush_fingerprints()
+        storage.save_json("state/crawl_manifest.json", {"urls": [listing_url]})
 
     records = OuHarvestPipeline(config).parse()
 
@@ -104,3 +162,7 @@ def test_pipeline_parse_produces_records_with_required_fields(connector, fixture
     for record in records:
         assert record.person_id
         assert record.full_name
+        if connector == "bgu":
+            assert any(link.kind == "personal_page" for link in record.links)
+        else:
+            assert record.contacts

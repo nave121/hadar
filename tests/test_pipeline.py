@@ -1,28 +1,57 @@
+import json
+import re
+from datetime import datetime, timezone
 from pathlib import Path
 
+from ou_harvest.adapters.bgu import BGU_SEARCH_URL
 from ou_harvest.config import AppConfig
+from ou_harvest.models import DiscoveryLink, PersonRecord
 from ou_harvest.pipeline import OuHarvestPipeline
 from ou_harvest.storage import Storage
+from tests.fixture_helpers import require_fixture
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
-def test_pipeline_parse_recognizes_bgu_listing_pages_without_results_aspx(tmp_path: Path):
+def _seed_bgu_search_results_artifact(tmp_path: Path) -> tuple[AppConfig, DiscoveryLink, dict]:
     config = AppConfig(university="bgu", output_root=str(tmp_path))
-    storage = Storage(tmp_path)
-    listing_url = "https://www.bgu.ac.il/people/"
-    listing_html = (FIXTURES / "bgu_listing_live.html").read_text(encoding="utf-8")
-
-    artifact = storage.write_artifact(
-        kind="html",
-        source_url=listing_url,
-        content=listing_html.encode("utf-8"),
-        content_type="text/html",
+    pipeline = OuHarvestPipeline(config)
+    storage = pipeline.storage
+    payload = json.loads(require_fixture("bgu_search_page_1.json").read_text(encoding="utf-8"))
+    request = DiscoveryLink(
+        url=BGU_SEARCH_URL,
+        method="POST",
+        artifact_kind="json",
+        headers={"Content-Type": "application/json"},
+        json_payload={
+            "pageNodeId": "107837",
+            "cultureCode": "he-IL",
+            "currentPage": 1,
+            "pageSize": len(payload["staffMembers"]),
+            "term": "",
+            "units": [],
+            "selectedTypes": [],
+            "selectedCampuses": [],
+            "currentStaff": False,
+            "lookingForStudents": False,
+        },
     )
-    storage.update_fingerprint(listing_url, artifact.checksum)
+    content = require_fixture("bgu_search_page_1.json").read_bytes()
+    artifact = storage.write_artifact(
+        kind="json",
+        source_url=request.url,
+        content=content,
+        content_type="application/json",
+    )
+    storage.update_fingerprint(pipeline._request_key(request), artifact.checksum)
     storage.flush_fingerprints()
-    storage.save_json("state/crawl_manifest.json", {"urls": [listing_url]})
+    storage.save_json("state/crawl_manifest.json", {"requests": [pipeline._manifest_entry(request)]})
+    return config, request, payload
+
+
+def test_pipeline_parse_recognizes_bgu_api_result_pages(tmp_path: Path):
+    config, _, _ = _seed_bgu_search_results_artifact(tmp_path)
 
     records = OuHarvestPipeline(config).parse()
 
@@ -31,9 +60,9 @@ def test_pipeline_parse_recognizes_bgu_listing_pages_without_results_aspx(tmp_pa
     assert suleiman.current_rank == "מרצה בכיר"
     assert suleiman.org_affiliations[0].staff_type == "חבר/ת סגל אקדמי בכיר"
     assert suleiman.org_affiliations[0].department == "הפקולטה למדעי הרוח והחברה, כלכלה"
-    khalil = next(record for record in records if record.full_name == "חליל אבו יונס")
+    khalil = next(record for record in records if record.full_name == "מוחמד אבו אחמד")
     assert any(
-        link.kind == "orcid" and link.url == "https://orcid.org/0009-0006-4362-267X"
+        link.kind == "orcid" and link.url == "https://orcid.org/0009-0001-6613-2044"
         for link in khalil.links
     )
 
@@ -122,6 +151,128 @@ def test_pipeline_photo_artifact_linkage(tmp_path: Path):
     assert photo_artifact is not None
     assert record.photo_artifact_id == photo_artifact.artifact_id
     assert any(artifact.kind == "image" and artifact.artifact_id == photo_artifact.artifact_id for artifact in record.artifacts)
+
+
+def test_pipeline_parse_merges_source_connectors_from_existing_record(tmp_path: Path):
+    config, _, _, _ = _seed_bgu_listing_with_photo(tmp_path, include_photo_artifact=False)
+    storage = Storage(tmp_path)
+    person_id = PersonRecord.create_id("ד\"ר טסט", "test@bgu.ac.il")
+    storage.save_record(
+        PersonRecord(
+            person_id=person_id,
+            full_name="ד\"ר טסט",
+            source_connectors=["openu"],
+        )
+    )
+
+    records = OuHarvestPipeline(config).parse()
+
+    assert len(records) == 1
+    record = records[0]
+    assert record.primary_email == "test@bgu.ac.il"
+    assert record.source_connectors == ["bgu", "openu"]
+    saved = storage.load_record(person_id)
+    assert saved is not None
+    assert saved.source_connectors == ["bgu", "openu"]
+
+
+def test_pipeline_export_uses_all_records_and_creates_unique_snapshot_files(tmp_path: Path, monkeypatch):
+    config = AppConfig(output_root=str(tmp_path))
+    storage = Storage(tmp_path)
+    storage.save_record(PersonRecord(person_id="abc123", full_name="Alpha Person"))
+    storage.save_record(PersonRecord(person_id="def456", full_name="Beta Person"))
+    storage.save_json("state/last_parse_ids.json", ["abc123"])
+
+    class FrozenDatetime:
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 4, 14, 12, 34, 56, tzinfo=timezone.utc)
+
+    monkeypatch.setattr("ou_harvest.pipeline.datetime", FrozenDatetime)
+
+    pipeline = OuHarvestPipeline(config)
+    first_path = pipeline.export("json")
+    second_path = pipeline.export("json")
+
+    assert re.fullmatch(r"people_\d{6}_\d{6}\.json", first_path.name)
+    assert second_path.name == first_path.name.replace(".json", "_02.json")
+
+    first_payload = json.loads(first_path.read_text(encoding="utf-8"))
+    second_payload = json.loads(second_path.read_text(encoding="utf-8"))
+    assert {item["person_id"] for item in first_payload} == {"abc123", "def456"}
+    assert {item["person_id"] for item in second_payload} == {"abc123", "def456"}
+
+
+def test_pipeline_crawl_stores_bgu_json_result_artifacts_and_request_manifest(tmp_path: Path):
+    from unittest.mock import MagicMock
+
+    from ou_harvest.http import FetchResult
+    from ou_harvest.models import DiscoverySnapshot
+
+    config = AppConfig(
+        university="bgu",
+        output_root=str(tmp_path),
+        allowed_domains=["bgu.ac.il", "apps4cloud.bgu.ac.il"],
+        personal_page_limit=0,
+    )
+    pipeline = OuHarvestPipeline(config)
+    storage = pipeline.storage
+
+    payload_bytes = require_fixture("bgu_search_page_1.json").read_bytes()
+    payload = json.loads(payload_bytes.decode("utf-8"))
+    result_link = DiscoveryLink(
+        url=BGU_SEARCH_URL,
+        method="POST",
+        artifact_kind="json",
+        headers={"Content-Type": "application/json"},
+        json_payload={
+            "pageNodeId": "107837",
+            "cultureCode": "he-IL",
+            "currentPage": 1,
+            "pageSize": len(payload["staffMembers"]),
+            "term": "",
+            "units": [],
+            "selectedTypes": [],
+            "selectedCampuses": [],
+            "currentStaff": False,
+            "lookingForStudents": False,
+        },
+    )
+    storage.save_json(
+        "state/discovery.json",
+        DiscoverySnapshot(
+            start_url="https://www.bgu.ac.il/people/",
+            connector_name="bgu",
+            result_links=[result_link],
+        ).model_dump(mode="json"),
+    )
+
+    pipeline.fetcher = MagicMock()
+    pipeline.fetcher.request = MagicMock(
+        return_value=FetchResult(
+            url=BGU_SEARCH_URL,
+            status_code=200,
+            content=payload_bytes,
+            content_type="application/json",
+        )
+    )
+    pipeline.fetcher.fetch = MagicMock(
+        side_effect=lambda url: FetchResult(
+            url=url,
+            status_code=200,
+            content=b"<html><body>empty profile</body></html>",
+            content_type="text/html",
+        )
+    )
+
+    crawled = pipeline.crawl()
+
+    assert BGU_SEARCH_URL in crawled
+    assert len(list(storage.raw_json.glob("*.json"))) == 1
+    manifest = storage.load_json("state/crawl_manifest.json")
+    assert len(manifest["requests"]) >= 1
+    assert manifest["requests"][0]["method"] == "POST"
+    assert manifest["requests"][0]["artifact_kind"] == "json"
 
 
 def test_pipeline_crawl_downloads_photos_when_demographics_enabled(tmp_path: Path, monkeypatch):

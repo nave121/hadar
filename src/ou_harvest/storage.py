@@ -12,6 +12,7 @@ class Storage:
     def __init__(self, root: Path):
         self.root = root
         self.raw_html = root / "raw" / "html"
+        self.raw_json = root / "raw" / "json"
         self.raw_pdf = root / "raw" / "pdf"
         self.raw_text = root / "raw" / "text"
         self.raw_image = root / "raw" / "image"
@@ -21,6 +22,7 @@ class Storage:
         self.state = root / "state"
         for path in (
             self.raw_html,
+            self.raw_json,
             self.raw_pdf,
             self.raw_text,
             self.raw_image,
@@ -53,8 +55,8 @@ class Storage:
             "html": self.raw_html,
             "pdf": self.raw_pdf,
             "text": self.raw_text,
+            "json": self.raw_json,
             "image": self.raw_image,
-            "json": self.state,
         }.get(kind, self.state)
         path = target_dir / f"{artifact_id}{extension}"
         if not path.exists():
@@ -134,12 +136,12 @@ class Storage:
             self._fingerprints = self.load_json("state/fingerprints.json", default={})
         return self._fingerprints
 
-    def update_fingerprint(self, url: str, checksum: str) -> None:
-        self._load_fingerprints()[url] = checksum
+    def update_fingerprint(self, request_key: str, checksum: str) -> None:
+        self._load_fingerprints()[request_key] = checksum
 
     def flush_fingerprints(self) -> None:
         if self._fingerprints is not None:
             self.save_json("state/fingerprints.json", self._fingerprints)
 
-    def should_process(self, url: str, checksum: str) -> bool:
-        return self._load_fingerprints().get(url) != checksum
+    def should_process(self, request_key: str, checksum: str) -> bool:
+        return self._load_fingerprints().get(request_key) != checksum

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import Any
 from datetime import datetime, timezone
 from hashlib import sha1
 from typing import Literal
@@ -145,6 +146,7 @@ class PersonRecord(BaseModel):
     last_seen_at: str = Field(default_factory=utc_now)
     enriched_at: str | None = None
     enriched_by: list[str] = Field(default_factory=list)
+    source_connectors: list[str] = Field(default_factory=list)
 
     @property
     def primary_email(self) -> str | None:
@@ -239,6 +241,7 @@ class PersonRecord(BaseModel):
         payload["demographics"] = _prefer_demographics(self.demographics, other.demographics)
         payload["confidence"] = min(self.confidence, other.confidence)
         payload["content_fingerprint"] = other.content_fingerprint or self.content_fingerprint
+        payload["source_connectors"] = sorted(set(self.source_connectors) | set(other.source_connectors))
         payload["last_seen_at"] = utc_now()
         return PersonRecord.model_validate(payload)
 
@@ -254,6 +257,10 @@ class PersonRecord(BaseModel):
 
 class DiscoveryLink(BaseModel):
     url: str
+    method: Literal["GET", "POST"] = "GET"
+    json_payload: dict[str, Any] | None = None
+    headers: dict[str, str] = Field(default_factory=dict)
+    artifact_kind: Literal["html", "json"] = "html"
     unit: str | None = None
     staff: str | None = None
     label: str | None = None
@@ -277,6 +284,7 @@ class DiscoverySnapshot(BaseModel):
     result_links: list[DiscoveryLink] = Field(default_factory=list)
     department_staff_links: list[LinkRecord] = Field(default_factory=list)
     available_filters: list[DiscoveryFilterGroup] = Field(default_factory=list)
+    connector_state: dict[str, Any] = Field(default_factory=dict)
 
     @property
     def available_units(self) -> list[DiscoveryOption]:
@@ -295,7 +303,11 @@ class DiscoverySnapshot(BaseModel):
 
 class ResultPageData(BaseModel):
     people: list[PersonRecord] = Field(default_factory=list)
-    pagination_urls: list[str] = Field(default_factory=list)
+    pagination_links: list[DiscoveryLink] = Field(default_factory=list)
+
+    @property
+    def pagination_urls(self) -> list[str]:
+        return [link.url for link in self.pagination_links if link.method == "GET"]
 
 
 class PersonalPageData(BaseModel):

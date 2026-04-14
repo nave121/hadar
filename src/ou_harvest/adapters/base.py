@@ -26,6 +26,14 @@ class UniversityAdapter(ABC):
     def parse_results_page(self, html: str, page_url: str) -> ResultPageData:
         """Parse a staff listing page into person records."""
 
+    def parse_results_artifact(
+        self,
+        content: bytes,
+        content_type: str | None,
+        result_link: DiscoveryLink,
+    ) -> ResultPageData:
+        return self.parse_results_page(content.decode("utf-8", errors="replace"), result_link.url)
+
     @abstractmethod
     def parse_personal_page(self, html: str, page_url: str) -> PersonalPageData:
         """Parse an individual staff member's personal page."""

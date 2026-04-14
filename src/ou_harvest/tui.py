@@ -275,7 +275,7 @@ class OuHarvestTUI:
                     "run_enrich_ollama": "Enrich records using local Ollama LLM (education, appointments, etc.)",
                     "run_enrich_openai": "Enrich records using OpenAI API (education, appointments, etc.)",
                     "run_review": "Build the review queue from low-confidence records",
-                    "run_export": "Export all records to JSON and JSONL in data/exports/",
+                    "run_export": "Export all canonical records to timestamped JSON and JSONL snapshots in data/exports/",
                     "cancel_run": "Cancel the currently running pipeline stage",
                     # Config actions
                     "save_config": "Write current settings back to ou_harvest.toml",
@@ -712,7 +712,7 @@ class OuHarvestTUI:
                     f"Status: {'RUNNING' if running else 'idle'}  |  Stage: {stage}{progress_str}  |  {_bidi_display(message)}",
                     f"Current: {person}  |  URL: {current_url}",
                     "",
-                    f"Records: {snapshot['records_count']}  |  Review: {snapshot['review_queue_count']}  |  HTML: {snapshot['raw_html_count']}  |  PDF: {snapshot['raw_pdf_count']}  |  Images: {snapshot['raw_image_count']}",
+                    f"Records: {snapshot['records_count']}  |  Review: {snapshot['review_queue_count']}  |  HTML: {snapshot['raw_html_count']}  |  JSON: {snapshot.get('raw_json_count', 0)}  |  PDF: {snapshot['raw_pdf_count']}  |  Images: {snapshot['raw_image_count']}",
                     f"Crawl Manifest: {snapshot['crawl_manifest_count']}  |  Discovered: {snapshot['discovered_result_links']}",
                     "",
                     f"Demographics: {'ON' if self.config.demographics.enabled else 'off'} ({self.config.demographics.detector_backend})",
@@ -724,7 +724,7 @@ class OuHarvestTUI:
             def _configure_tables(self) -> None:
                 records = self.query_one("#records", DataTable)
                 records.cursor_type = "row"
-                records.add_columns("Name", "Gender", "Race", "Age", "Photo", "Rank", "Role", "Email", "Department", "Links")
+                records.add_columns("Source", "Name", "Rank", "Role", "Email", "Department", "Photo", "Links")
 
                 reviews = self.query_one("#reviews", DataTable)
                 reviews.cursor_type = "row"
@@ -740,17 +740,15 @@ class OuHarvestTUI:
                     dept = ""
                     if record.org_affiliations:
                         dept = record.org_affiliations[0].department or ""
-                    demographics = record.demographics
+                    source_summary = ", ".join(record.source_connectors)
                     table.add_row(
+                        source_summary,
                         _bidi_display(record.full_name),
-                        demographics.dominant_gender if demographics and demographics.dominant_gender else "",
-                        demographics.dominant_race if demographics and demographics.dominant_race else "",
-                        str(demographics.estimated_age) if demographics and demographics.estimated_age is not None else "",
-                        _photo_status(record),
                         _bidi_display(record.current_rank or ""),
                         _bidi_display(record.current_role or ""),
                         record.primary_email or "",
                         _bidi_display(dept),
+                        _photo_status(record),
                         link_summary,
                     )
 

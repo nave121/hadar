@@ -115,7 +115,7 @@ def parse_results_page(html: str, page_url: str) -> ResultPageData:
             if _is_results_pagination_link(anchor, page_url)
         }
     )
-    return ResultPageData(people=people, pagination_urls=pagination_urls)
+    return ResultPageData(people=people, pagination_links=[DiscoveryLink(url=url) for url in pagination_urls])
 
 
 def parse_personal_page(html: str, page_url: str) -> PersonalPageData:

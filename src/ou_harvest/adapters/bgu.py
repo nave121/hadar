@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 import requests
 from urllib.parse import urljoin, urlparse
 
@@ -23,6 +24,7 @@ from ..parsers import PHONE_RE, normalize_space, _extract_rank, _dedupe_contacts
 from .base import UniversityAdapter
 
 BGU_PAGE_DATA_URL = "https://www.bgu.ac.il/umbraco/api/staffMembersLobbyApi/GetPageData"
+BGU_SEARCH_URL = "https://www.bgu.ac.il/umbraco/api/staffMembersLobbyApi/searchStaffMembers"
 BGU_PAGE_NODE_ID = "107837"
 BGU_CULTURE_CODE = "he-IL"
 
@@ -30,10 +32,9 @@ BGU_CULTURE_CODE = "he-IL"
 class BguAdapter(UniversityAdapter):
     """Ben-Gurion University staff directory adapter.
 
-    BGU's people page (bgu.ac.il/people/) is a Vue.js SPA. Staff are listed
-    as .staff-member-item cards with name, staff type, department, and email.
-    Pagination goes up to ~221 pages with 30 people each.
-    Requires Playwright to render.
+    BGU's people page is a Vue.js SPA backed by public Umbraco JSON endpoints.
+    The normal crawl path uses the public listing API. Rendered HTML cards are
+    still parsed as a fallback for fixtures and manual testing.
     """
 
     name = "bgu"
@@ -42,56 +43,60 @@ class BguAdapter(UniversityAdapter):
     default_allowed_domains = ["bgu.ac.il", "www.bgu.ac.il", "in.bgu.ac.il", "apps4cloud.bgu.ac.il"]
 
     def requires_playwright(self) -> bool:
-        return True
+        return False
 
     def parse_discovery_page(self, html: str, start_url: str) -> DiscoverySnapshot:
+        page_node_id, culture_code = self._extract_people_app_state(html)
         available_filters: list[DiscoveryFilterGroup] = []
-        page_data = self._load_page_data()
+        connector_state: dict[str, Any] = {
+            "page_node_id": page_node_id,
+            "culture_code": culture_code,
+        }
+        page_data = self._load_page_data(page_node_id=page_node_id, culture_code=culture_code)
         if page_data:
             available_filters = self._build_available_filters(page_data)
+            page_size = page_data.get("pageSize")
+            if isinstance(page_size, int):
+                connector_state["page_size"] = page_size
         return DiscoverySnapshot(
             connector_name=self.name,
             start_url=start_url,
             available_filters=available_filters,
+            connector_state=connector_state,
         )
 
     def generate_result_links(
         self, snapshot: DiscoverySnapshot, selected_filters: dict[str, list[str]]
     ) -> list[DiscoveryLink]:
-        """Generate paginated listing URLs for the BGU people directory."""
-        base = self.default_start_url.rstrip("/")
-        links: list[DiscoveryLink] = []
-        selected_units = selected_filters.get("unit", [])
-        selected_staff_types = selected_filters.get("staff_type", [])
-        selected_campuses = selected_filters.get("campus", [])
+        """Generate the first API-backed results request for the BGU people directory."""
+        payload = self._build_search_payload(snapshot, selected_filters, current_page=1)
+        return [
+            DiscoveryLink(
+                url=BGU_SEARCH_URL,
+                method="POST",
+                json_payload=payload,
+                headers={"Content-Type": "application/json"},
+                artifact_kind="json",
+                label="BGU Search Results Page 1",
+            )
+        ]
 
-        filtered_params: list[tuple[str, str]] = []
-        if selected_units:
-            filtered_params.append(("unit", ",".join(selected_units)))
-        if selected_staff_types:
-            filtered_params.append(("types", ",".join(selected_staff_types)))
-        if selected_campuses:
-            filtered_params.append(("campuses", ",".join(selected_campuses)))
-
-        def build_page_url(page_num: int) -> str:
-            params = list(filtered_params)
-            if page_num > 1:
-                params.append(("page", str(page_num)))
-            if not params:
-                return base + "/"
-            query = "&".join(f"{key}={value}" for key, value in params)
-            return f"{base}/?{query}"
-
-        # Page 1 is the base URL (no param), then ?page=2 through ?page=221
-        # Start with a conservative estimate; the crawl will follow pagination for more
-        max_pages = 230
-        links.append(DiscoveryLink(url=build_page_url(1), label="BGU People Page 1"))
-        for page_num in range(2, max_pages + 1):
-            links.append(DiscoveryLink(
-                url=build_page_url(page_num),
-                label=f"BGU People Page {page_num}",
-            ))
-        return links
+    def parse_results_artifact(
+        self,
+        content: bytes,
+        content_type: str | None,
+        result_link: DiscoveryLink,
+    ) -> ResultPageData:
+        normalized_content_type = (content_type or "").split(";", 1)[0].strip().lower()
+        if normalized_content_type == "application/json" or result_link.artifact_kind == "json":
+            try:
+                payload = json.loads(content.decode("utf-8", errors="replace"))
+            except ValueError:
+                return ResultPageData()
+            if isinstance(payload, dict):
+                return self._parse_search_results_payload(payload, result_link)
+            return ResultPageData()
+        return self.parse_results_page(content.decode("utf-8", errors="replace"), result_link.url)
 
     def parse_results_page(self, html: str, page_url: str) -> ResultPageData:
         """Parse BGU staff listing page with .staff-member-item cards."""
@@ -110,7 +115,184 @@ class BguAdapter(UniversityAdapter):
             if "/people/?page=" in href:
                 pagination_urls.append(urljoin(page_url, href))
 
-        return ResultPageData(people=people, pagination_urls=sorted(set(pagination_urls)))
+        if people:
+            return ResultPageData(
+                people=people,
+                pagination_links=[DiscoveryLink(url=url) for url in sorted(set(pagination_urls))],
+            )
+        if self._is_people_spa_shell(soup):
+            return ResultPageData()
+        return ResultPageData()
+
+    def _parse_search_results_payload(
+        self,
+        payload: dict[str, Any],
+        result_link: DiscoveryLink,
+    ) -> ResultPageData:
+        people: list[PersonRecord] = []
+        for item in payload.get("staffMembers", []):
+            if not isinstance(item, dict):
+                continue
+            record = self._parse_search_result_item(item, result_link.url)
+            if record is not None:
+                people.append(record)
+
+        request_payload = result_link.json_payload or {}
+        try:
+            total_pages = int(payload.get("totalPages") or 1)
+        except (TypeError, ValueError):
+            total_pages = 1
+        try:
+            current_page = int(request_payload.get("currentPage") or 1)
+        except (TypeError, ValueError):
+            current_page = 1
+        pagination_links: list[DiscoveryLink] = []
+        for page_num in range(current_page + 1, total_pages + 1):
+            next_payload = dict(request_payload)
+            next_payload["currentPage"] = page_num
+            pagination_links.append(
+                DiscoveryLink(
+                    url=result_link.url,
+                    method="POST",
+                    json_payload=next_payload,
+                    headers=dict(result_link.headers),
+                    artifact_kind="json",
+                    label=f"BGU Search Results Page {page_num}",
+                )
+            )
+        return ResultPageData(people=people, pagination_links=pagination_links)
+
+    def _parse_search_result_item(self, item: dict[str, Any], page_url: str) -> PersonRecord | None:
+        full_name = normalize_space(str(item.get("name", "")).strip())
+        if not full_name:
+            return None
+
+        raw_email = normalize_space(str(item.get("email", "")).strip()) or None
+        public_email = None if self._is_placeholder_email(raw_email) else raw_email
+        person_id = PersonRecord.create_id(full_name, raw_email)
+
+        contacts: list[ContactPoint] = []
+        if public_email:
+            contacts.append(ContactPoint(kind="email", value=public_email))
+        phone = normalize_space(str(item.get("phone", "")).strip())
+        if phone:
+            contacts.append(ContactPoint(kind="phone", value=phone))
+
+        affiliations: list[OrgAffiliation] = []
+        rank: str | None = None
+        for department in item.get("departments", []):
+            if not isinstance(department, dict):
+                continue
+            department_name = normalize_space(str(department.get("name", "")).strip()) or None
+            staff_type = normalize_space(str(department.get("memberPosition", "")).strip()) or None
+            if rank is None:
+                rank = (
+                    normalize_space(str(department.get("stepInGradeDescription", "")).strip())
+                    or normalize_space(str(department.get("gradeDescription", "")).strip())
+                    or None
+                )
+            affiliations.append(
+                OrgAffiliation(
+                    organization="Ben-Gurion University of the Negev",
+                    department=department_name,
+                    faculty_or_unit=department_name,
+                    staff_type=staff_type,
+                )
+            )
+        if not affiliations:
+            affiliations.append(OrgAffiliation(organization="Ben-Gurion University of the Negev"))
+
+        links: list[LinkRecord] = []
+        page_href = normalize_space(str(item.get("pageUrl", "")).strip())
+        if page_href:
+            profile_url = urljoin(page_url, page_href)
+            links.append(LinkRecord(kind="personal_page", url=profile_url, label=full_name))
+        orcid_url = normalize_space(str(item.get("orcLink", "")).strip())
+        if orcid_url:
+            links.append(LinkRecord(kind="orcid", url=orcid_url, label="ORCID"))
+
+        role = normalize_space(str(item.get("responsibleFor", "")).strip()) or None
+        photo_url = self._normalize_photo_url(item.get("image"), page_url)
+        evidence_excerpt = json.dumps(
+            {
+                "name": item.get("name"),
+                "email": public_email,
+                "phone": phone or None,
+                "departments": item.get("departments", []),
+                "pageUrl": item.get("pageUrl"),
+                "orcLink": item.get("orcLink"),
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        return PersonRecord(
+            person_id=person_id,
+            full_name=full_name,
+            contacts=contacts,
+            org_affiliations=affiliations,
+            current_role=role,
+            current_rank=rank or _extract_rank(full_name),
+            photo_url=photo_url,
+            links=_dedupe_links(links),
+            source_evidence=[
+                SourceEvidence(
+                    field_name="directory_record",
+                    source_url=page_url,
+                    excerpt=evidence_excerpt[:500],
+                    confidence=0.97,
+                )
+            ],
+        )
+
+    def _extract_people_app_state(self, html: str) -> tuple[str, str]:
+        soup = BeautifulSoup(html, "html.parser")
+        app_root = soup.select_one(
+            "#staffMembersModernLobbyApp, #staffMembersLobbyApp, #staffMembersMainLobbyApp"
+        )
+        if app_root is None:
+            return BGU_PAGE_NODE_ID, BGU_CULTURE_CODE
+        page_node_id = normalize_space(app_root.get("page-node-id", "")).strip() or BGU_PAGE_NODE_ID
+        culture_code = normalize_space(app_root.get("culture-code", "")).strip() or BGU_CULTURE_CODE
+        return page_node_id, culture_code
+
+    def _is_people_spa_shell(self, soup: BeautifulSoup) -> bool:
+        return soup.select_one(
+            "#staffMembersModernLobbyApp, #staffMembersLobbyApp, #staffMembersMainLobbyApp"
+        ) is not None
+
+    def _build_search_payload(
+        self,
+        snapshot: DiscoverySnapshot,
+        selected_filters: dict[str, list[str]],
+        *,
+        current_page: int,
+    ) -> dict[str, Any]:
+        connector_state = snapshot.connector_state or {}
+        return {
+            "pageNodeId": str(connector_state.get("page_node_id") or BGU_PAGE_NODE_ID),
+            "cultureCode": str(connector_state.get("culture_code") or BGU_CULTURE_CODE),
+            "currentPage": current_page,
+            "pageSize": int(connector_state.get("page_size") or 30),
+            "term": "",
+            "units": self._int_filter_values(selected_filters.get("unit", [])),
+            "selectedTypes": self._int_filter_values(selected_filters.get("staff_type", [])),
+            "selectedCampuses": self._int_filter_values(selected_filters.get("campus", [])),
+            "currentStaff": False,
+            "lookingForStudents": False,
+        }
+
+    def _int_filter_values(self, values: list[str]) -> list[int]:
+        result: list[int] = []
+        for value in values:
+            try:
+                result.append(int(value))
+            except (TypeError, ValueError):
+                continue
+        return result
+
+    def _is_placeholder_email(self, email: str | None) -> bool:
+        lowered = (email or "").lower()
+        return lowered.endswith("@bgu.no.email")
 
     def parse_personal_page(self, html: str, page_url: str) -> PersonalPageData:
         """Parse a BGU individual profile page."""
@@ -478,15 +660,23 @@ class BguAdapter(UniversityAdapter):
         if not raw_url:
             return None
         photo_url = urljoin(page_url, raw_url.strip())
-        if "no-profile.png" in photo_url.lower():
+        lowered = photo_url.lower()
+        if "no-profile.png" in lowered or "img_vector" in lowered:
             return None
         return photo_url
 
-    def _load_page_data(self) -> dict | None:
+    def _load_page_data(
+        self,
+        page_node_id: str | None = None,
+        culture_code: str | None = None,
+    ) -> dict | None:
         try:
             response = requests.post(
                 BGU_PAGE_DATA_URL,
-                json={"pageNodeId": BGU_PAGE_NODE_ID, "cultureCode": BGU_CULTURE_CODE},
+                json={
+                    "pageNodeId": page_node_id or BGU_PAGE_NODE_ID,
+                    "cultureCode": culture_code or BGU_CULTURE_CODE,
+                },
                 timeout=30,
             )
             response.raise_for_status()

@@ -134,13 +134,16 @@ class PipelineRunner:
         crawl_manifest = self.storage.load_json("state/crawl_manifest.json", default={"urls": []})
         discovery = self.storage.load_json("state/discovery.json", default={})
         review_queue = self.storage.load_json("review/queue.json", default=[])
+        crawl_requests = crawl_manifest.get("requests")
+        crawl_manifest_count = len(crawl_requests) if isinstance(crawl_requests, list) else len(crawl_manifest.get("urls", []))
         return {
             "records_count": len(self.storage.all_records()),
             "raw_html_count": len(list(self.storage.raw_html.glob("*.html"))),
+            "raw_json_count": len(list(self.storage.raw_json.glob("*.json"))),
             "raw_pdf_count": len(list(self.storage.raw_pdf.glob("*.pdf"))),
             "raw_image_count": len(list(self.storage.raw_image.glob("*.*"))),
             "review_queue_count": len(review_queue),
-            "crawl_manifest_count": len(crawl_manifest.get("urls", [])),
+            "crawl_manifest_count": crawl_manifest_count,
             "discovered_result_links": len(discovery.get("result_links", [])),
             "exports": sorted(str(path) for path in self.storage.exports.glob("*")),
         }
