@@ -683,17 +683,23 @@ def _dedupe_contacts(contacts: list[ContactPoint]) -> list[ContactPoint]:
 
 
 def _extract_figure_photo(soup: BeautifulSoup, page_url: str) -> str | None:
-    """Extract a profile photo from a <figure><img> pattern, filtering placeholders."""
-    figure = soup.find("figure")
-    if not figure:
-        return None
-    img = figure.find("img")
-    if not img or not img.get("src"):
-        return None
-    src = img["src"]
-    if "Avatar-General" in src:
-        return None
-    return urljoin(page_url, src)
+    """Extract a profile photo from OpenU personal pages.
+
+    Real photos live in MediaServer_Images/PersonalSites/ with a
+    person-specific filename.  Placeholders use Avatar-General-*.jpg.
+    The parent element varies (<figure>, <div>, etc.) so we match by
+    src pattern rather than container tag.
+    """
+    for img in soup.find_all("img"):
+        src = img.get("src", "")
+        if "MediaServer_Images/PersonalSites/" not in src:
+            continue
+        if "logo" in src.lower():
+            continue
+        if "Avatar-General" in src:
+            continue
+        return urljoin(page_url, src)
+    return None
 
 
 def _extract_select_options(soup: BeautifulSoup, name_matcher) -> list[DiscoveryOption]:

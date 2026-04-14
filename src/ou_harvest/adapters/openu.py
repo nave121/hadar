@@ -65,13 +65,13 @@ class OpenUniversityAdapter(UniversityAdapter):
 
     def extract_photo_url(self, html: str, page_url: str) -> str | None:
         soup = BeautifulSoup(html, "html.parser")
-        figure = soup.find("figure")
-        if not figure:
-            return None
-        img = figure.find("img")
-        if not img or not img.get("src"):
-            return None
-        src = img["src"]
-        if "Avatar-General" in src:
-            return None
-        return urljoin(page_url, src)
+        for img in soup.find_all("img"):
+            src = img.get("src", "")
+            if "MediaServer_Images/PersonalSites/" not in src:
+                continue
+            if "logo" in src.lower():
+                continue
+            if "Avatar-General" in src:
+                continue
+            return urljoin(page_url, src)
+        return None
