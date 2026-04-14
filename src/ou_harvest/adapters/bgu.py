@@ -207,7 +207,8 @@ class BguAdapter(UniversityAdapter):
         if page_href:
             profile_url = urljoin(page_url, page_href)
             links.append(LinkRecord(kind="personal_page", url=profile_url, label=full_name))
-        orcid_url = normalize_space(str(item.get("orcLink", "")).strip())
+        raw_orcid_url = item.get("orcLink")
+        orcid_url = normalize_space(str(raw_orcid_url).strip()) if raw_orcid_url else ""
         if orcid_url:
             links.append(LinkRecord(kind="orcid", url=orcid_url, label="ORCID"))
 

@@ -6,6 +6,7 @@ import json
 import logging
 from pathlib import Path
 from typing import Any, Callable, Iterable
+from urllib.parse import urlsplit, urlunsplit
 
 from .config import AppConfig
 from .demographics import analyze_photo
@@ -708,7 +709,19 @@ class OuHarvestPipeline:
         return artifact
 
     def _artifact_for_url(self, source_url: str, *, kind: str) -> Artifact | None:
-        checksum = self.storage._load_fingerprints().get(source_url)
+        fingerprints = self.storage._load_fingerprints()
+        checksum = fingerprints.get(source_url)
+        if not checksum:
+            normalized = self._normalize_lookup_url(source_url)
+            if normalized != source_url:
+                checksum = fingerprints.get(normalized)
+            if not checksum and normalized.startswith(("http://", "https://")):
+                for request_key, candidate_checksum in fingerprints.items():
+                    if not request_key.startswith(("http://", "https://")):
+                        continue
+                    if self._normalize_lookup_url(request_key) == normalized:
+                        checksum = candidate_checksum
+                        break
         if not checksum:
             return None
 
@@ -734,6 +747,12 @@ class OuHarvestPipeline:
             checksum=checksum,
             content_type=_content_type_for_suffix(path.suffix),
         )
+
+    def _normalize_lookup_url(self, source_url: str) -> str:
+        parts = urlsplit(source_url)
+        if not parts.scheme or not parts.netloc:
+            return source_url
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
 
     def _select_photo_artifact(self, record: PersonRecord) -> Artifact | None:
         if record.photo_artifact_id:

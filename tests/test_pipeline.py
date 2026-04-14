@@ -153,6 +153,76 @@ def test_pipeline_photo_artifact_linkage(tmp_path: Path):
     assert any(artifact.kind == "image" and artifact.artifact_id == photo_artifact.artifact_id for artifact in record.artifacts)
 
 
+def test_pipeline_photo_artifact_linkage_matches_photo_urls_ignoring_query(tmp_path: Path):
+    config = AppConfig(university="bgu", output_root=str(tmp_path))
+    storage = Storage(tmp_path)
+    listing_url = "https://www.bgu.ac.il/people/"
+    profile_url = "https://www.bgu.ac.il/people/test-person/"
+    listing_photo_url = "https://apps4cloud.bgu.ac.il/media/photos/test-person.jpg"
+    profile_photo_url = f"{listing_photo_url}?width=300&format=webp"
+
+    listing_html = f"""
+    <html>
+      <body>
+        <a class="staff-member-item" href="/people/test-person/">
+          <div class="member-image"><img src="{listing_photo_url}" /></div>
+          <div class="member-content">
+            <div class="top-section"><h2 class="member-name">ד\"ר טסט</h2></div>
+            <div class="department"><span>מרצה בכיר</span></div>
+            <div class="bottom-section"><a href="mailto:test@bgu.ac.il">test@bgu.ac.il</a></div>
+          </div>
+        </a>
+      </body>
+    </html>
+    """
+    profile_html = f"""
+    <html>
+      <body>
+        <section class="profile-data-container">
+          <header class="top-section">
+            <h1>ד\"ר טסט</h1>
+            <section class="member-contacts">
+              <a href="mailto:test@bgu.ac.il">test@bgu.ac.il</a>
+            </section>
+          </header>
+          <figure class="profile-image">
+            <img src="{profile_photo_url}" />
+          </figure>
+        </section>
+      </body>
+    </html>
+    """
+
+    for url, html in (
+        (listing_url, listing_html),
+        (profile_url, profile_html),
+    ):
+        artifact = storage.write_artifact(
+            kind="html",
+            source_url=url,
+            content=html.encode("utf-8"),
+            content_type="text/html",
+        )
+        storage.update_fingerprint(url, artifact.checksum)
+
+    photo_artifact = storage.write_artifact(
+        kind="image",
+        source_url=listing_photo_url,
+        content=b"photo-bytes",
+        content_type="image/jpeg",
+    )
+    storage.update_fingerprint(listing_photo_url, photo_artifact.checksum)
+    storage.flush_fingerprints()
+    storage.save_json("state/crawl_manifest.json", {"urls": [listing_url, profile_url, listing_photo_url]})
+
+    records = OuHarvestPipeline(config).parse()
+
+    assert len(records) == 1
+    record = records[0]
+    assert record.photo_url == profile_photo_url
+    assert record.photo_artifact_id == photo_artifact.artifact_id
+
+
 def test_pipeline_parse_merges_source_connectors_from_existing_record(tmp_path: Path):
     config, _, _, _ = _seed_bgu_listing_with_photo(tmp_path, include_photo_artifact=False)
     storage = Storage(tmp_path)
