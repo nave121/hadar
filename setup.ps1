@@ -100,9 +100,28 @@ function Invoke-OuHarvest ([string]$py_exe, [string[]]$CliArgs) {
     }
 }
 
+function Test-PythonImport ([string]$py_exe, [string]$ModuleName) {
+    $previousErrorActionPreference = $ErrorActionPreference
+    $hadNativePreference = Test-Path Variable:PSNativeCommandUseErrorActionPreference
+    if ($hadNativePreference) {
+        $previousNativePreference = $PSNativeCommandUseErrorActionPreference
+        $script:PSNativeCommandUseErrorActionPreference = $false
+    }
+
+    try {
+        $script:ErrorActionPreference = "Continue"
+        & $py_exe -c "import importlib.util, sys; raise SystemExit(0 if importlib.util.find_spec('$ModuleName') else 1)" 2>$null
+        return ($LASTEXITCODE -eq 0)
+    } finally {
+        $script:ErrorActionPreference = $previousErrorActionPreference
+        if ($hadNativePreference) {
+            $script:PSNativeCommandUseErrorActionPreference = $previousNativePreference
+        }
+    }
+}
+
 function Ensure-Installed ([string]$py_exe) {
-    & $py_exe -c "import ou_harvest" 2>$null
-    if ($LASTEXITCODE -ne 0) {
+    if (-not (Test-PythonImport $py_exe "ou_harvest")) {
         Write-Bold "Installing ou-harvest with all extras..."
         & $py_exe -m pip install --upgrade pip --quiet
         & $py_exe -m pip install -e ".[tui,playwright,pdf]" --quiet
@@ -115,8 +134,7 @@ function Ensure-Installed ([string]$py_exe) {
 }
 
 function Ensure-Playwright ([string]$py_exe) {
-    & $py_exe -c "import playwright" 2>$null
-    if ($LASTEXITCODE -ne 0) {
+    if (-not (Test-PythonImport $py_exe "playwright")) {
         return
     }
 
