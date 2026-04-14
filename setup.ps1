@@ -272,8 +272,10 @@ function Cmd-Stage ([string]$py_exe, [string]$stage, [string[]]$StageArgs = @())
 }
 
 # ---------- main ----------
-$cmd = $args[0]
-if ($null -eq $cmd) { $cmd = "install" }
+$cmd = "install"
+if ($args.Count -gt 0) {
+    $cmd = $args[0]
+}
 
 switch ($cmd) {
     "install" {
